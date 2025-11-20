@@ -27,15 +27,15 @@ This is the minimal software structure we would expect.
 
 The optional requirements are given as:
 
-Integration of a valid squat counter incl. visualization (6 %)
-Create a sound every time a valid squat was done & include a check Box for the feature in your visualization (6%)
-Integration of a knee angle graph in the visualisation (always visualize the last X seconds) (11%)
-Integration of handle tracking incl. visualization of squat hight (6%)
-Integration of a handle position graph in the visualisation (always visualize the last Y seconds) (11%)
+Integration of a valid squat counter incl. visualization (4%)
+Create a sound every time a valid squat was done & include a check Box for the feature in your visualization (4%)
+Integration of a knee angle graph (visualize the last X seconds) (8%)
+Integration of handle tracking incl. visualization of squat hight (4%)
+Integration of a handle position graph (visualize the last Y seconds) (8%)
+Make it 3D with MMPose (12%)
 
 
 Each of the given optional requirements would have an impact on the software structure. A possible structure could look like:
-
 
 
 Initializing state:
