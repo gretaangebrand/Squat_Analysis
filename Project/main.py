@@ -44,7 +44,6 @@ class SquatAnalysisApp:
         stop_button.pack(pady=5)
 
         # --- Kamera Setup ---
-                # --- Kamera Setup ---
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             print("❌ Cannot open camera")
@@ -58,6 +57,9 @@ class SquatAnalysisApp:
         # feste GUI-Update-Rate: 40 ms ≈ 25 fps
         self.update_interval = 40
         print(f"GUI update interval (ms): {self.update_interval}")
+
+        # Letzte Marker-Zentren speichern (für Visualisierung)
+        self.last_centers = {}
 
         # --- ArUco Setup ---
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
@@ -142,6 +144,29 @@ class SquatAnalysisApp:
         else:
             self.knee_angle_var.set("Knee angle: -- °")
 
+        # --- Boden-Referenzlinie ---
+        height, width, _ = frame.shape
+        y_floor = int(height * 0.8)
+        cv2.line(frame, (0, y_floor), (width, y_floor), (0, 255, 0), 2)
+
+        # --- Femur-Segment (Hüfte -> Knie) einzeichnen, falls Marker da ---
+        if (self.MARKER_HIP_ID in self.last_centers and
+            self.MARKER_KNEE_ID in self.last_centers):
+            hip = self.last_centers[self.MARKER_HIP_ID]
+            knee = self.last_centers[self.MARKER_KNEE_ID]
+
+            # Koordinaten in int casten
+            hip_pt = (int(hip[0]), int(hip[1]))
+            knee_pt = (int(knee[0]), int(knee[1]))
+
+            # Punkte markieren
+            cv2.circle(frame, hip_pt, 6, (0, 0, 255), -1)   # Hüfte = rot
+            cv2.circle(frame, knee_pt, 6, (255, 0, 0), -1)  # Knie = blau
+
+            # Linie dazwischen (Femur)
+            cv2.line(frame, hip_pt, knee_pt, (0, 0, 255), 2)
+
+
         # Optional: Frame mit eingezeichneten Markern anzeigen
         cv2.imshow("Squat Camera", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -169,6 +194,9 @@ class SquatAnalysisApp:
                 pts = corners[i][0]  # 4 Eckpunkte (4x2)
                 center = pts.mean(axis=0)  # Mittelwert der x/y-Koordinaten
                 centers[int(marker_id)] = center
+
+            # Zentren für spätere Visualisierung speichern
+            self.last_centers = centers
 
             femur_angle = self.compute_femur_angle(centers)
             knee_angle = self.compute_knee_angle(centers)
