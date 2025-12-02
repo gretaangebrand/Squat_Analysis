@@ -10,7 +10,7 @@ class SquatAnalysisApp:
 
     - Öffnet eine Kamera
     - Erkennt ArUco-Marker
-    - Berechnet (grob) Femur- und Kniewinkel
+    - Berechnet Femur- und Kniewinkel
     - Zeigt die Winkel in einer Tkinter-GUI an
     """
 
@@ -34,7 +34,7 @@ class SquatAnalysisApp:
         femur_label.pack(pady=10)
         knee_label.pack(pady=10)
 
-        #Squat approval label
+        # Squat approval label
         self.squat_status_var = tk.StringVar(value="Squat: --")
         squat_label = ttk.Label(self.window, textvariable=self.squat_status_var, font=("Arial", 16))
         squat_label.pack(pady=10)
@@ -78,18 +78,17 @@ class SquatAnalysisApp:
         params.adaptiveThreshConstant = 7
 
         # Markerrand-Anforderungen (wenn Marker kleiner sind, Min-Rate runtersetzen)
-        params.minMarkerPerimeterRate = 0.02   # Standard ist höher
+        params.minMarkerPerimeterRate = 0.02
         params.maxMarkerPerimeterRate = 4.0
 
-        # Abstand der Ecken – zu klein kann rauschen, zu groß blockiert bei nahen Markern
+        # Abstand der Ecken
         params.minCornerDistanceRate = 0.02
 
-        # Ecken genauer verfeinern (macht Erkennung stabiler, aber minimal langsamer)
+        # Ecken genauer verfeinern
         params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
 
         self.aruco_params = params
         self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-
 
         # Zum sauberen Beenden
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -136,22 +135,28 @@ class SquatAnalysisApp:
             self.window.after(100, self.update_loop)
             return
 
-        femur_angle, knee_angle = self.process_frame(frame)
+        femur_angle, knee_angle, squat_depth_angle = self.process_frame(frame)
 
-        # GUI-Labels aktualisieren (falls Winkel berechnet werden konnten) + Squat status
+        # Anatomischen Femur-Segmentwinkel anzeigen
         if femur_angle is not None:
-            if femur_angle <= 0:
+            self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °")
+        else:
+            self.femur_angle_var.set("Femur angle: -- °")
+
+        # Knie-Winkel anzeigen
+        if knee_angle is not None:
+            self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °")
+        else:
+            self.knee_angle_var.set("Knee angle: -- °")
+
+        # Squat approval basierend auf Squat-Depth-Winkel
+        if squat_depth_angle is not None:
+            if squat_depth_angle <= 0:   # 0° und tiefer = OK
                 self.squat_status_var.set("Squat: ✅ depth OK")
             else:
                 self.squat_status_var.set("Squat: ❌ too high")
         else:
             self.squat_status_var.set("Squat: --")
-
-
-        if knee_angle is not None:
-            self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °")
-        else:
-            self.knee_angle_var.set("Knee angle: -- °")
 
         # --- Boden-Referenzlinie ---
         height, width, _ = frame.shape
@@ -160,7 +165,7 @@ class SquatAnalysisApp:
 
         # --- Femur-Segment (Hüfte -> Knie) einzeichnen, falls Marker da ---
         if (self.MARKER_HIP_ID in self.last_centers and
-            self.MARKER_KNEE_ID in self.last_centers):
+                self.MARKER_KNEE_ID in self.last_centers):
             hip = self.last_centers[self.MARKER_HIP_ID]
             knee = self.last_centers[self.MARKER_KNEE_ID]
 
@@ -175,14 +180,13 @@ class SquatAnalysisApp:
             # Linie dazwischen (Femur)
             cv2.line(frame, hip_pt, knee_pt, (0, 0, 255), 2)
 
-
-        # Optional: Frame mit eingezeichneten Markern anzeigen
+        # Frame mit eingezeichneten Markern anzeigen
         cv2.imshow("Squat Camera", frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             self.stop_measurement()
 
-        # Nächsten Schritt planen (z.B. alle 20 ms)
-        self.window.after(20, self.update_loop)
+        # Nächsten Schritt planen
+        self.window.after(self.update_interval, self.update_loop)
 
     # ------------------------------------------------------------------
     # Bildverarbeitung & Winkelberechnung
@@ -207,14 +211,36 @@ class SquatAnalysisApp:
             # Zentren für spätere Visualisierung speichern
             self.last_centers = centers
 
-            femur_angle = self.compute_femur_angle(centers)
+            femur_segment_angle = self.compute_femur_segment_angle(centers)
+            squat_depth_angle = self.compute_squat_depth_angle(centers)
             knee_angle = self.compute_knee_angle(centers)
-            return femur_angle, knee_angle
+
+            return femur_segment_angle, knee_angle, squat_depth_angle
 
         # falls keine Marker erkannt
-        return None, None
+        return None, None, None
 
-    def compute_femur_angle(self, centers):
+    def compute_femur_segment_angle(self, centers):
+        """
+        Anatomischer Femur-Segmentwinkel relativ zur Horizontalen.
+        0°  -> Femur horizontal
+        +90°/-90° -> vertikal
+        """
+        if (self.MARKER_HIP_ID not in centers) or (self.MARKER_KNEE_ID not in centers):
+            return None
+
+        hip = centers[self.MARKER_HIP_ID]
+        knee = centers[self.MARKER_KNEE_ID]
+
+        vec = knee - hip  # [dx, dy]
+        dx = vec[0]
+        dy = -vec[1]  # Bild-y nach oben drehen
+
+        angle_rad = np.arctan2(dy, dx)
+        angle_deg = np.degrees(angle_rad)
+        return angle_deg
+
+    def compute_squat_depth_angle(self, centers):
         """
         Squat-Depth-Winkel:
         0°  -> Hüfte und Knie auf gleicher Höhe (Femur waagrecht)
