@@ -34,6 +34,11 @@ class SquatAnalysisApp:
         femur_label.pack(pady=10)
         knee_label.pack(pady=10)
 
+        #Squat approval label
+        self.squat_status_var = tk.StringVar(value="Squat: --")
+        squat_label = ttk.Label(self.window, textvariable=self.squat_status_var, font=("Arial", 16))
+        squat_label.pack(pady=10)
+
         # Start-Button
         self.is_measuring = False
         start_button = ttk.Button(self.window, text="Start measurement", command=self.start_measurement)
@@ -133,11 +138,15 @@ class SquatAnalysisApp:
 
         femur_angle, knee_angle = self.process_frame(frame)
 
-        # GUI-Labels aktualisieren (falls Winkel berechnet werden konnten)
+        # GUI-Labels aktualisieren (falls Winkel berechnet werden konnten) + Squat status
         if femur_angle is not None:
-            self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °")
+            if femur_angle <= 0:
+                self.squat_status_var.set("Squat: ✅ depth OK")
+            else:
+                self.squat_status_var.set("Squat: ❌ too high")
         else:
-            self.femur_angle_var.set("Femur angle: -- °")
+            self.squat_status_var.set("Squat: --")
+
 
         if knee_angle is not None:
             self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °")
@@ -207,26 +216,29 @@ class SquatAnalysisApp:
 
     def compute_femur_angle(self, centers):
         """
-        Femur-Winkel relativ zur Boden-Horizontalen.
-        Dafür brauchen wir Hüft- und Knie-Marker.
+        Squat-Depth-Winkel:
+        0°  -> Hüfte und Knie auf gleicher Höhe (Femur waagrecht)
+        <0° -> Hüfte unter Knie (guter, tiefer Squat)
+        >0° -> Hüfte über Knie (zu hoch)
         """
         if (self.MARKER_HIP_ID not in centers) or (self.MARKER_KNEE_ID not in centers):
             return None
 
-        hip = centers[self.MARKER_HIP_ID]
-        knee = centers[self.MARKER_KNEE_ID]
+        hip = centers[self.MARKER_HIP_ID]   # [x_hip, y_hip]
+        knee = centers[self.MARKER_KNEE_ID] # [x_knee, y_knee]
 
-        # Vektor vom Hüftmarker zum Kniewinkel
-        vec = knee - hip  # [dx, dy]
+        vec = knee - hip
+        femur_len = np.linalg.norm(vec)
+        if femur_len == 0:
+            return None
 
-        # Bildkoordinaten: y nach unten -> für "mathematischen" Winkel dy invertieren
-        dx = vec[0]
-        dy = -vec[1]
+        # y-Koordinate: nach unten positiv
+        dy = knee[1] - hip[1]  # >0: Knie tiefer als Hüfte (Hüfte höher); <0 umgekehrt
 
-        angle_rad = np.arctan2(dy, dx)  # Winkel relativ zur x-Achse
+        ratio = np.clip(dy / femur_len, -1.0, 1.0)
+        angle_rad = np.arcsin(ratio)
         angle_deg = np.degrees(angle_rad)
 
-        # Je nach Definition kannst du hier noch anpassen (z.B. Betrag)
         return angle_deg
 
     def compute_knee_angle(self, centers):
