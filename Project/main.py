@@ -163,22 +163,34 @@ class SquatAnalysisApp:
         y_floor = int(height * 0.8)
         cv2.line(frame, (0, y_floor), (width, y_floor), (0, 255, 0), 2)
 
-        # --- Femur-Segment (Hüfte -> Knie) einzeichnen, falls Marker da ---
-        if (self.MARKER_HIP_ID in self.last_centers and
-                self.MARKER_KNEE_ID in self.last_centers):
+        # --- Segmente einzeichnen, falls Marker da ---
+        has_hip = self.MARKER_HIP_ID in self.last_centers
+        has_knee = self.MARKER_KNEE_ID in self.last_centers
+        has_ankle = self.MARKER_ANKLE_ID in self.last_centers
+
+        if has_hip:
             hip = self.last_centers[self.MARKER_HIP_ID]
-            knee = self.last_centers[self.MARKER_KNEE_ID]
-
-            # Koordinaten in int casten
             hip_pt = (int(hip[0]), int(hip[1]))
-            knee_pt = (int(knee[0]), int(knee[1]))
-
-            # Punkte markieren
             cv2.circle(frame, hip_pt, 6, (0, 0, 255), -1)   # Hüfte = rot
+
+        if has_knee:
+            knee = self.last_centers[self.MARKER_KNEE_ID]
+            knee_pt = (int(knee[0]), int(knee[1]))
             cv2.circle(frame, knee_pt, 6, (255, 0, 0), -1)  # Knie = blau
 
-            # Linie dazwischen (Femur)
+        if has_ankle:
+            ankle = self.last_centers[self.MARKER_ANKLE_ID]
+            ankle_pt = (int(ankle[0]), int(ankle[1]))
+            cv2.circle(frame, ankle_pt, 6, (0, 255, 0), -1)  # Knöchel = grün
+
+        # Oberschenkel (Hüfte -> Knie) = rote Linie
+        if has_hip and has_knee:
             cv2.line(frame, hip_pt, knee_pt, (0, 0, 255), 2)
+
+        # Unterschenkel (Knie -> Knöchel) = grüne Linie
+        if has_knee and has_ankle:
+            cv2.line(frame, knee_pt, ankle_pt, (0, 255, 0), 2)
+
 
         # Frame mit eingezeichneten Markern anzeigen
         cv2.imshow("Squat Camera", frame)
@@ -198,27 +210,37 @@ class SquatAnalysisApp:
         corners, ids, _ = self.aruco_detector.detectMarkers(gray)
 
         if ids is not None:
-            # Marker im Bild anzeigen
+            # Marker anzeigen
             cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 
-            # in Dict: id -> Mittelpunkt
+            # Neue sichtbare Marker sammeln
             centers = {}
             for i, marker_id in enumerate(ids.flatten()):
-                pts = corners[i][0]  # 4 Eckpunkte (4x2)
-                center = pts.mean(axis=0)  # Mittelwert der x/y-Koordinaten
+                pts = corners[i][0]           # 4 Eckpunkte
+                center = pts.mean(axis=0)     # Mittelpunkt
                 centers[int(marker_id)] = center
 
-            # Zentren für spätere Visualisierung speichern
-            self.last_centers = centers
+            # Sichtbare Marker in last_valid_centers aktualisieren
+            for mid, c in centers.items():
+                self.last_valid_centers[mid] = c
 
-            femur_segment_angle = self.compute_femur_segment_angle(centers)
-            squat_depth_angle = self.compute_squat_depth_angle(centers)
-            knee_angle = self.compute_knee_angle(centers)
+            # Nutze alle bekannten Marker (sichtbar + zuletzt gültig)
+            all_centers = self.last_valid_centers.copy()
 
-            return femur_segment_angle, knee_angle, squat_depth_angle
+        else:
+            # Keine Marker erkannt → fallback auf last_valid_centers
+            all_centers = self.last_valid_centers.copy()
 
-        # falls keine Marker erkannt
-        return None, None, None
+        # Für Visualisierung speichern
+        self.last_centers = all_centers
+
+        # Winkel berechnen
+        femur_segment_angle = self.compute_femur_segment_angle(all_centers)
+        squat_depth_angle = self.compute_squat_depth_angle(all_centers)
+        knee_angle = self.compute_knee_angle(all_centers)
+
+        return femur_segment_angle, knee_angle, squat_depth_angle
+
 
     def compute_femur_segment_angle(self, centers):
         """
