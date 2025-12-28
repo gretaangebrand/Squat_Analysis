@@ -1,18 +1,18 @@
+import sys
 import cv2
 import tkinter as tk
 from tkinter import ttk
-import sys
+from collections import deque
 import winsound
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from aruco_tracker import ArucoTracker, ArucoTrackerConfig
 from angles import femur_segment_angle_deg, squat_depth_angle_deg, knee_angle_deg
 
-from collections import deque
-import matplotlib
-matplotlib.use("TkAgg")
-
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 # =========================
 # Plot configuration
@@ -21,23 +21,25 @@ WINDOW_SECONDS = 6
 FPS_ESTIMATE = 25
 MAX_SAMPLES = WINDOW_SECONDS * FPS_ESTIMATE  # 150
 
+
 class SquatAnalysisApp:
     """
     Squat Analysis – Main GUI App
 
     - Öffnet Kamera
-    - Holt Markerzentren über ArucoTracker (ausgelagert)
-    - Berechnet Winkel
+    - Holt Markerzentren über ArucoTracker (ausgelagert, inkl. max_gap_seconds)
+    - Berechnet Winkel + Bar-Höhe
     - Zeichnet Segmente + zeigt Werte in GUI
     - Tracking Status + stabiler Valid-Squat Counter (State Machine)
+    - Live Plots (Knee + Bar)
+    - Histogram Tab (wird beim Stop befüllt, Standpose herausgefiltert)
     """
 
-    # Marker IDs anpassen je nach Platzierung
+    # Marker IDs (anpassen je nach Platzierung)
     MARKER_HIP_ID = 42
     MARKER_KNEE_ID = 41
     MARKER_ANKLE_ID = 40
-    MARKER_BAR_ID = 43   # Bar/Handle marker
-
+    MARKER_BAR_ID = 43  # Handle/Bar marker
 
     def __init__(self, camera_index: int = 1):
         # -------------------------
@@ -46,52 +48,63 @@ class SquatAnalysisApp:
         self.window = tk.Tk()
         self.window.title("Squat Analysis")
 
+        # -------------------------
+        # Tabs (Notebook)
+        # -------------------------
+        self.notebook = ttk.Notebook(self.window)
+        self.tab_live = ttk.Frame(self.notebook)
+        self.tab_hist = ttk.Frame(self.notebook)
+
+        self.notebook.add(self.tab_live, text="Live")
+        self.notebook.add(self.tab_hist, text="Histogram")
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+
+        # -------------------------
+        # Tk Variables / Labels (Live Tab)
+        # -------------------------
         self.femur_angle_var = tk.StringVar(value="Femur angle: -- °")
         self.knee_angle_var = tk.StringVar(value="Knee angle: -- °")
         self.squat_status_var = tk.StringVar(value="Squat: --")
         self.tracking_status_var = tk.StringVar(value="Tracking: --")
-        # -------------------------
+
         # Handle / Bar height tracking
-        # -------------------------
-        self.bar_y_ref = None              # Referenz-y (Stand) in Pixel
-        self.bar_height_px = None          # aktuelle Höhe relativ zur Referenz (Pixel)
-
+        self.bar_y_ref = None
+        self.bar_height_px = None
         self.bar_height_var = tk.StringVar(value="Bar height: -- px")
-        ttk.Label(self.window, textvariable=self.bar_height_var, font=("Arial", 16)).pack(pady=10)
 
-
-        ttk.Label(self.window, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.window, textvariable=self.knee_angle_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.window, textvariable=self.squat_status_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.window, textvariable=self.tracking_status_var, font=("Arial", 14)).pack(pady=6)
+        ttk.Label(self.tab_live, textvariable=self.bar_height_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.tab_live, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.tab_live, textvariable=self.knee_angle_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.tab_live, textvariable=self.squat_status_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.tab_live, textvariable=self.tracking_status_var, font=("Arial", 14)).pack(pady=6)
 
         self.is_measuring = False
-        ttk.Button(self.window, text="Start measurement", command=self.start_measurement).pack(pady=10)
-        ttk.Button(self.window, text="Stop measurement", command=self.stop_measurement).pack(pady=5)
+        ttk.Button(self.tab_live, text="Start measurement", command=self.start_measurement).pack(pady=10)
+        ttk.Button(self.tab_live, text="Stop measurement", command=self.stop_measurement).pack(pady=5)
 
         # -------------------------
-        # Squat Counter / State Machine
+        # Squat Counter / State Machine (Live Tab)
         # -------------------------
         self.rep_count = 0
         self.rep_count_var = tk.StringVar(value="Valid squats: 0")
-        ttk.Label(self.window, textvariable=self.rep_count_var, font=("Arial", 16)).pack(pady=10)
-        # --- Sound on valid squat (checkbox) ---
-        self.sound_enabled_var = tk.BooleanVar(value=True)  # default an (oder False, wie du willst)
-        ttk.Checkbutton(self.window, text="Sound on valid squat", variable=self.sound_enabled_var).pack(pady=6)
+        ttk.Label(self.tab_live, textvariable=self.rep_count_var, font=("Arial", 16)).pack(pady=10)
 
+        # Sound checkbox
+        self.sound_enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            self.tab_live,
+            text="Sound on valid squat",
+            variable=self.sound_enabled_var
+        ).pack(pady=6)
 
-        # Hysterese (gegen Flackern)
-        self.depth_ok_threshold = -2.0     # <= -> OK (tief genug)
-        self.depth_high_threshold = 2.0   # >= -> HIGH (zu hoch)
+        # Hysterese
+        self.depth_ok_threshold = -2.0
+        self.depth_high_threshold = 2.0
 
-        # Mindestdauer (Frames) für stabile Zustände
+        # Mindestdauer (Frames)
         self.stable_frames_required = 5
-
-        # interne Zähler
         self._ok_streak = 0
         self._high_streak = 0
-
-        # Zustände: "READY" (oben), "BOTTOM" (unten stabil erreicht)
         self._squat_state = "READY"
 
         # -------------------------
@@ -103,12 +116,10 @@ class SquatAnalysisApp:
         else:
             print("Camera opened successfully")
 
-        # moderate Auflösung für weniger Rechenaufwand
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-        # feste GUI-Update-Rate: 40 ms ≈ 25 fps
-        self.update_interval = 40
+        self.update_interval = 40  # ms ≈ 25 fps GUI loop
         print(f"GUI update interval (ms): {self.update_interval}")
 
         # -------------------------
@@ -117,36 +128,76 @@ class SquatAnalysisApp:
         tracker_cfg = ArucoTrackerConfig(
             dictionary=cv2.aruco.DICT_6X6_250,
             update_interval_ms=self.update_interval,
-            max_gap_seconds=1.0,  # 1s Toleranz für verdeckte Marker
+            max_gap_seconds=1.0,
         )
         self.tracker = ArucoTracker(tracker_cfg)
 
-        # Letzte Marker-Zentren (für Zeichnung)
         self.last_centers = {}
 
         # -------------------------
-        # Knee angle buffer (last X seconds)
+        # Live Plot Buffers
         # -------------------------
-        self.knee_angle_buffer = deque(maxlen=150)  # 6 Sekunden @ ~25 fps
+        self.knee_angle_buffer = deque(maxlen=MAX_SAMPLES)
+        self.bar_height_buffer = deque(maxlen=MAX_SAMPLES)
+
         # -------------------------
-        # Matplotlib plot (embedded)
+        # Matplotlib Live Plot (embedded) -> IN tab_live
         # -------------------------
-        self.fig = Figure(figsize=(6, 2.5), dpi=100)
-        self.ax = self.fig.add_subplot(111)
+        self.fig = Figure(figsize=(7, 4.5), dpi=100)
 
-        self.ax.set_title("Knee Angle (last 6 seconds)")
-        self.ax.set_xlabel("Time (frames)")
-        self.ax.set_ylabel("Angle (deg)")
-        self.ax.set_ylim(0, 180)
-        self.ax.set_xlim(0, 150)
-        self.ax.grid(True)
+        self.ax_knee = self.fig.add_subplot(211)
+        self.ax_knee.set_title(f"Knee Angle (last {WINDOW_SECONDS} seconds)")
+        self.ax_knee.set_xlabel("Samples")
+        self.ax_knee.set_ylabel("Angle (deg)")
+        self.ax_knee.set_ylim(0, 180)
+        self.ax_knee.set_xlim(0, MAX_SAMPLES)
+        self.ax_knee.grid(True)
+        self.knee_line, = self.ax_knee.plot([], [], linewidth=2)
 
-        self.knee_line, = self.ax.plot([], [], color="blue", linewidth=2)
+        self.ax_bar = self.fig.add_subplot(212)
+        self.ax_bar.set_title(f"Bar Height (last {WINDOW_SECONDS} seconds)")
+        self.ax_bar.set_xlabel("Samples")
+        self.ax_bar.set_ylabel("Height (px)")
+        self.ax_bar.set_xlim(0, MAX_SAMPLES)
+        self.ax_bar.grid(True)
+        self.bar_line, = self.ax_bar.plot([], [], linewidth=2)
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.window)
+        self.fig.tight_layout()
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.tab_live)
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=10)
 
+        # -------------------------
+        # Histogram Figure (Tab) (wird beim Stop befüllt)
+        # -------------------------
+        self.hist_fig = Figure(figsize=(7, 4.5), dpi=100)
+        self.ax_hist_depth = self.hist_fig.add_subplot(121)  # 1D Histogram
+        self.ax_hist_xy = self.hist_fig.add_subplot(122)     # 2D Histogram
+
+        self.ax_hist_depth.set_title("Bar depth distribution (filtered)")
+        self.ax_hist_depth.set_xlabel("Depth (px)")
+        self.ax_hist_depth.set_ylabel("Count")
+        self.ax_hist_depth.grid(True)
+
+        self.ax_hist_xy.set_title("Bar position distribution (x,y)")
+        self.ax_hist_xy.set_xlabel("x (px)")
+        self.ax_hist_xy.set_ylabel("y (px)")
+        self.ax_hist_xy.grid(True)
+
+        self.hist_fig.tight_layout()
+
+        self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=self.tab_hist)
+        self.hist_canvas.draw()
+        self.hist_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=10)
+
+        # -------------------------
+        # Data for histogram (collected during session)
+        # -------------------------
+        self.hist_depth_samples = []
+        self.hist_x_samples = []
+        self.hist_y_samples = []
+        self.stand_depth_threshold_px = 10.0  # ggf. tunen
 
         # sauberes Beenden
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -157,17 +208,27 @@ class SquatAnalysisApp:
     def start_measurement(self):
         if not self.is_measuring:
             self.tracker.reset()
-            self.bar_y_ref = None
-            self.bar_height_px = None
-            self.bar_height_var.set("Bar height: -- px")
 
-
-            # counter/state reset (optional aber sinnvoll)
+            # counter/state reset
             self.rep_count = 0
             self.rep_count_var.set("Valid squats: 0")
             self._squat_state = "READY"
             self._ok_streak = 0
             self._high_streak = 0
+
+            # bar reference reset
+            self.bar_y_ref = None
+            self.bar_height_px = None
+            self.bar_height_var.set("Bar height: -- px")
+
+            # buffers reset
+            self.knee_angle_buffer.clear()
+            self.bar_height_buffer.clear()
+
+            # histogram data reset
+            self.hist_depth_samples.clear()
+            self.hist_x_samples.clear()
+            self.hist_y_samples.clear()
 
             self.is_measuring = True
             self.update_loop()
@@ -176,6 +237,10 @@ class SquatAnalysisApp:
     def stop_measurement(self):
         self.is_measuring = False
         print("Measurement stopped")
+
+        # render histograms and switch tab
+        self.render_histograms()
+        self.notebook.select(self.tab_hist)
 
     def on_close(self):
         self.is_measuring = False
@@ -188,7 +253,7 @@ class SquatAnalysisApp:
         self.window.mainloop()
 
     # ------------------------------------------------------------------
-    # Hauptloop
+    # Main Loop
     # ------------------------------------------------------------------
     def update_loop(self):
         if not self.is_measuring:
@@ -203,45 +268,17 @@ class SquatAnalysisApp:
 
             femur_angle, knee_angle, squat_depth_angle, bar_height_px = self.process_frame(frame)
 
-            # Tracking Status updaten (basierend auf last_centers)
+            # Tracking Status
             self.update_tracking_status(self.last_centers)
 
             # GUI Winkel
-            if femur_angle is not None:
-                self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °")
-            else:
-                self.femur_angle_var.set("Femur angle: -- °")
-
-            if knee_angle is not None:
-                self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °")
-            else:
-                self.knee_angle_var.set("Knee angle: -- °")
-            # --- Knee angle buffer update ---
-            if knee_angle is not None:
-                self.knee_angle_buffer.append(knee_angle)
-            else:
-                # Optional: Lücke (verhindert Zacken)
-                self.knee_angle_buffer.append(float("nan"))
-            # --- Bar height GUI update ---
-            if bar_height_px is not None:
-                self.bar_height_var.set(f"Bar height: {bar_height_px:.1f} px")
-            else:
-                self.bar_height_var.set("Bar height: -- px")
-
-
-            # --- Update knee angle plot ---
-            y_data = list(self.knee_angle_buffer)
-            x_data = list(range(len(y_data)))
-
-            self.knee_line.set_data(x_data, y_data)
-            self.ax.set_xlim(0, max(150, len(y_data)))
-            self.canvas.draw_idle()
-
+            self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °" if femur_angle is not None else "Femur angle: -- °")
+            self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °" if knee_angle is not None else "Knee angle: -- °")
+            self.bar_height_var.set(f"Bar height: {bar_height_px:.1f} px" if bar_height_px is not None else "Bar height: -- px")
 
             # --- Stabilisierung + Statusanzeige + Counter ---
             depth_class, ok_stable, high_stable = self.update_depth_stability(squat_depth_angle)
 
-            # Anzeige (mit borderline)
             if depth_class is None:
                 self.squat_status_var.set("Squat: --")
             elif depth_class == "OK":
@@ -251,41 +288,58 @@ class SquatAnalysisApp:
             else:
                 self.squat_status_var.set("Squat: ⚠ borderline")
 
-            # Wenn kein Depth-Signal (z.B. Marker fehlen), State zurücksetzen
+            # Wenn Depth nicht verfügbar -> reset state
             if depth_class is None:
                 self._squat_state = "READY"
 
-            # State Machine fürs Zählen:
-            # READY -> BOTTOM wenn unten stabil erreicht
+            # READY -> BOTTOM
             if self._squat_state == "READY":
                 if ok_stable:
                     self._squat_state = "BOTTOM"
 
-            # BOTTOM -> READY (+1) wenn wieder oben stabil erreicht
+            # BOTTOM -> READY (+1)
             elif self._squat_state == "BOTTOM":
                 if high_stable:
                     self.rep_count += 1
                     self.rep_count_var.set(f"Valid squats: {self.rep_count}")
-
-                    # ✅ SOUND TRIGGER
                     self.play_valid_squat_sound()
-
                     self._squat_state = "READY"
 
+            # --- Buffers updaten ---
+            self.knee_angle_buffer.append(knee_angle if knee_angle is not None else float("nan"))
+            self.bar_height_buffer.append(bar_height_px if bar_height_px is not None else float("nan"))
 
-            # Boden-Referenzlinie
-            height, width, _ = frame.shape
-            y_floor = int(height * 0.8)
-            cv2.line(frame, (0, y_floor), (width, y_floor), (0, 255, 0), 2)
+            # --- Live Plots updaten ---
+            self.update_live_plots()
 
-            # Segmente zeichnen
+            # --- Collect histogram data (exclude stand pose) ---
+            if (self.MARKER_BAR_ID in self.last_centers) and (bar_height_px is not None):
+                bar = self.last_centers[self.MARKER_BAR_ID]
+                bar_x = float(bar[0])
+                bar_y = float(bar[1])
+
+                # Standpose raus: nur Werte, die "wirklich tiefer" sind
+                if bar_height_px > self.stand_depth_threshold_px:
+                    self.hist_depth_samples.append(float(bar_height_px))
+                    self.hist_x_samples.append(bar_x)
+                    self.hist_y_samples.append(bar_y)
+
+            # Boden-Referenzlinie (optional)
+            h, w, _ = frame.shape
+            y_floor = int(h * 0.8)
+            cv2.line(frame, (0, y_floor), (w, y_floor), (0, 255, 0), 2)
+
+            # Segmente + Bar Marker zeichnen
             self.draw_segments(frame)
 
-            # Overlay im Video (optional hilfreich)
+            # Overlay
             cv2.putText(frame, f"Reps: {self.rep_count}", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
             cv2.putText(frame, f"State: {self._squat_state}", (10, 65),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            if bar_height_px is not None:
+                cv2.putText(frame, f"Bar depth: {bar_height_px:.1f}px", (10, 95),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
             # Frame anzeigen
             cv2.imshow("Squat Camera", frame)
@@ -295,48 +349,64 @@ class SquatAnalysisApp:
             self.window.after(self.update_interval, self.update_loop)
 
         except Exception as e:
-            # robustes Verhalten: stop + anzeigen
             print(f"❌ Error in update_loop: {e}")
             self.squat_status_var.set("Squat: ERROR (see console)")
             self.stop_measurement()
 
     # ------------------------------------------------------------------
-    # Prozess: Marker -> Winkel
+    # Process frame: marker -> angles + bar height
     # ------------------------------------------------------------------
     def process_frame(self, frame):
         centers = self.tracker.update(frame, draw=True)
         self.last_centers = centers
 
-        # --- Bar height computation (relative to start position) ---
-        if self.MARKER_BAR_ID in centers:
-            bar_y = float(centers[self.MARKER_BAR_ID][1])
-
-            # Referenz beim ersten gültigen Frame setzen
-            if self.bar_y_ref is None:
-                self.bar_y_ref = bar_y
-
-            self.bar_height_px = bar_y - self.bar_y_ref  # >0 wenn bar nach unten (tiefer = größerer y-Wert)
-        else:
-            # wenn BAR fehlt: lasse letzten Wert stehen (oder setze None, je nachdem was du willst)
-            self.bar_height_px = self.bar_height_px
-
-
         femur_angle = femur_segment_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         depth_angle = squat_depth_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         knee_angle = knee_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID, self.MARKER_ANKLE_ID)
 
-        return femur_angle, knee_angle, depth_angle, self.bar_height_px
+        # --- Bar depth (positive = going down) ---
+        bar_height_px = None
+        if self.MARKER_BAR_ID in centers:
+            bar_y = float(centers[self.MARKER_BAR_ID][1])
+            if self.bar_y_ref is None:
+                self.bar_y_ref = bar_y
+            bar_height_px = bar_y - self.bar_y_ref  # >0 means lower than start
+
+        self.bar_height_px = bar_height_px
+        return femur_angle, knee_angle, depth_angle, bar_height_px
 
     # ------------------------------------------------------------------
-    # Depth Stability / Hysterese + Mindestdauer
+    # Live plot update
+    # ------------------------------------------------------------------
+    def update_live_plots(self):
+        # Knee
+        knee_y = list(self.knee_angle_buffer)
+        knee_x = list(range(len(knee_y)))
+        self.knee_line.set_data(knee_x, knee_y)
+        self.ax_knee.set_xlim(0, MAX_SAMPLES)
+
+        # Bar
+        bar_y = list(self.bar_height_buffer)
+        bar_x = list(range(len(bar_y)))
+        self.bar_line.set_data(bar_x, bar_y)
+        self.ax_bar.set_xlim(0, MAX_SAMPLES)
+
+        # dynamic y-limits for bar (ignore NaNs)
+        finite_bar = [v for v in bar_y if v == v]  # NaN != NaN
+        if finite_bar:
+            vmin = min(finite_bar)
+            vmax = max(finite_bar)
+            pad = max(5.0, 0.1 * (vmax - vmin + 1e-9))
+            self.ax_bar.set_ylim(vmin - pad, vmax + pad)
+        else:
+            self.ax_bar.set_ylim(-50, 50)
+
+        self.canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # Depth stability / hysterese + minimum duration
     # ------------------------------------------------------------------
     def update_depth_stability(self, depth_angle):
-        """
-        Liefert:
-        - depth_class: "OK" / "HIGH" / "MID" / None
-        - ok_stable: True wenn OK mindestens stable_frames_required Frames
-        - high_stable: True wenn HIGH mindestens stable_frames_required Frames
-        """
         if depth_angle is None:
             self._ok_streak = 0
             self._high_streak = 0
@@ -358,30 +428,9 @@ class SquatAnalysisApp:
         ok_stable = self._ok_streak >= self.stable_frames_required
         high_stable = self._high_streak >= self.stable_frames_required
         return depth_class, ok_stable, high_stable
-    
-    # ------------------------------------------------------------------
-    # Sound bei gültigem Squat
-    # ------------------------------------------------------------------
-    def play_valid_squat_sound(self):
-        """
-        Spielt einen kurzen Sound ab (wenn verfügbar).
-        """
-        if not self.sound_enabled_var.get():
-            return
-
-        # Windows-Beep (am zuverlässigsten ohne externe libs)
-        if winsound is not None:
-            # frequency Hz, duration ms
-            winsound.Beep(880, 150)
-            return
-
-        # Fallback: Terminal bell (kann funktionieren, je nach System/Terminal)
-        sys.stdout.write("\a")
-        sys.stdout.flush()
-
 
     # ------------------------------------------------------------------
-    # Tracking Status
+    # Tracking status
     # ------------------------------------------------------------------
     def update_tracking_status(self, centers: dict):
         required = {
@@ -394,11 +443,11 @@ class SquatAnalysisApp:
         present = [mid for mid in required.keys() if mid in centers]
         missing = [required[mid] for mid in required.keys() if mid not in centers]
 
-        if len(present) == 3:
+        if len(present) == 4:
             status = "OK"
-        elif len(present) == 2:
+        elif len(present) == 3:
             status = "DEGRADED"
-        elif len(present) == 1:
+        elif len(present) == 2:
             status = "WEAK"
         else:
             status = "LOST"
@@ -406,21 +455,20 @@ class SquatAnalysisApp:
         if missing:
             self.tracking_status_var.set(f"Tracking: {status}  (missing: {', '.join(missing)})")
         else:
-            self.tracking_status_var.set("Tracking: OK  (3/3 markers)")
+            self.tracking_status_var.set("Tracking: OK  (4/4 markers)")
 
     # ------------------------------------------------------------------
-    # Visualisierung (Linien/Punkte)
+    # Visualization: segments + bar marker
     # ------------------------------------------------------------------
     def draw_segments(self, frame):
         centers = self.last_centers
 
-        hip_pt = knee_pt = ankle_pt = None
+        hip_pt = knee_pt = ankle_pt = bar_pt = None
 
         has_hip = self.MARKER_HIP_ID in centers
         has_knee = self.MARKER_KNEE_ID in centers
         has_ankle = self.MARKER_ANKLE_ID in centers
         has_bar = self.MARKER_BAR_ID in centers
-
 
         if has_hip:
             hip = centers[self.MARKER_HIP_ID]
@@ -437,30 +485,79 @@ class SquatAnalysisApp:
             ankle_pt = (int(ankle[0]), int(ankle[1]))
             cv2.circle(frame, ankle_pt, 6, (0, 255, 0), -1)  # grün
 
-
-        # Oberschenkel rot
+        # Femur
         if has_hip and has_knee and hip_pt and knee_pt:
             cv2.line(frame, hip_pt, knee_pt, (0, 0, 255), 2)
 
-        # Unterschenkel grün
+        # Tibia
         if has_knee and has_ankle and knee_pt and ankle_pt:
             cv2.line(frame, knee_pt, ankle_pt, (0, 255, 0), 2)
 
-        # Bar/Handle Marker (ID 43) = gelb + horizontale Linie
+        # Bar marker + horizontal line
         if has_bar:
             bar = centers[self.MARKER_BAR_ID]
             bar_pt = (int(bar[0]), int(bar[1]))
+            cv2.circle(frame, bar_pt, 7, (0, 255, 255), -1)  # gelb
 
-            # Punkt
-            cv2.circle(frame, bar_pt, 7, (0, 255, 255), -1)  # gelb (BGR)
-
-            # horizontale Linie auf Bar-Höhe
             h, w, _ = frame.shape
             cv2.line(frame, (0, bar_pt[1]), (w, bar_pt[1]), (0, 255, 255), 2)
-
-            # Label
             cv2.putText(frame, "BAR (43)", (bar_pt[0] + 10, bar_pt[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+    # ------------------------------------------------------------------
+    # Histogram rendering (called on stop)
+    # ------------------------------------------------------------------
+    def render_histograms(self):
+        self.ax_hist_depth.cla()
+        self.ax_hist_xy.cla()
+
+        self.ax_hist_depth.set_title("Bar depth distribution (filtered)")
+        self.ax_hist_depth.set_xlabel("Depth (px)")
+        self.ax_hist_depth.set_ylabel("Count")
+        self.ax_hist_depth.grid(True)
+
+        self.ax_hist_xy.set_title("Bar position distribution (x,y)")
+        self.ax_hist_xy.set_xlabel("x (px)")
+        self.ax_hist_xy.set_ylabel("y (px)")
+        self.ax_hist_xy.grid(True)
+
+        if len(self.hist_depth_samples) < 5:
+            self.ax_hist_depth.text(
+                0.5, 0.5,
+                "Not enough data collected\n(check threshold / marker visibility)",
+                ha="center", va="center", transform=self.ax_hist_depth.transAxes
+            )
+            self.ax_hist_xy.text(
+                0.5, 0.5,
+                "Not enough data collected",
+                ha="center", va="center", transform=self.ax_hist_xy.transAxes
+            )
+            self.hist_canvas.draw()
+            return
+
+        # 1D histogram depth
+        self.ax_hist_depth.hist(self.hist_depth_samples, bins=20)
+
+        # 2D histogram x/y
+        self.ax_hist_xy.hist2d(self.hist_x_samples, self.hist_y_samples, bins=30)
+
+        self.hist_fig.tight_layout()
+        self.hist_canvas.draw()
+
+    # ------------------------------------------------------------------
+    # Sound
+    # ------------------------------------------------------------------
+    def play_valid_squat_sound(self):
+        if not self.sound_enabled_var.get():
+            return
+
+        if winsound is not None:
+            winsound.Beep(880, 150)
+            return
+
+        # fallback: terminal bell
+        sys.stdout.write("\a")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
