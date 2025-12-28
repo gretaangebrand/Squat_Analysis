@@ -1,54 +1,102 @@
 import cv2
-import numpy as np
 import tkinter as tk
 from tkinter import ttk
+import sys
+import winsound
 
+from aruco_tracker import ArucoTracker, ArucoTrackerConfig
+from angles import femur_segment_angle_deg, squat_depth_angle_deg, knee_angle_deg
+
+from collections import deque
+import matplotlib
+matplotlib.use("TkAgg")
+
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# =========================
+# Plot configuration
+# =========================
+WINDOW_SECONDS = 6
+FPS_ESTIMATE = 25
+MAX_SAMPLES = WINDOW_SECONDS * FPS_ESTIMATE  # 150
 
 class SquatAnalysisApp:
     """
-    Minimalstruktur für das Squat-Analyse-Projekt.
+    Squat Analysis – Main GUI App
 
-    - Öffnet eine Kamera
-    - Erkennt ArUco-Marker
-    - Berechnet Femur- und Kniewinkel
-    - Zeigt die Winkel in einer Tkinter-GUI an
+    - Öffnet Kamera
+    - Holt Markerzentren über ArucoTracker (ausgelagert)
+    - Berechnet Winkel
+    - Zeichnet Segmente + zeigt Werte in GUI
+    - Tracking Status + stabiler Valid-Squat Counter (State Machine)
     """
 
-    # Marker anpassen je nach Platzierung
-    MARKER_HIP_ID = 42     # Marker z.B. am Hüftknochen/Femur-Proximal
-    MARKER_KNEE_ID = 41    # Marker am Knie
-    MARKER_ANKLE_ID = 40   # Marker am Knöchel/Unterschenkel Distal
+    # Marker IDs anpassen je nach Platzierung
+    MARKER_HIP_ID = 42
+    MARKER_KNEE_ID = 41
+    MARKER_ANKLE_ID = 40
+    MARKER_BAR_ID = 43   # Bar/Handle marker
+
 
     def __init__(self, camera_index: int = 1):
-        # --- GUI Setup ---
+        # -------------------------
+        # GUI Setup
+        # -------------------------
         self.window = tk.Tk()
-        self.window.title("Squat Analysis – Minimal Version")
+        self.window.title("Squat Analysis")
 
-        # Labels für Winkel
         self.femur_angle_var = tk.StringVar(value="Femur angle: -- °")
         self.knee_angle_var = tk.StringVar(value="Knee angle: -- °")
-
-        femur_label = ttk.Label(self.window, textvariable=self.femur_angle_var, font=("Arial", 16))
-        knee_label = ttk.Label(self.window, textvariable=self.knee_angle_var, font=("Arial", 16))
-
-        femur_label.pack(pady=10)
-        knee_label.pack(pady=10)
-
-        # Squat approval label
         self.squat_status_var = tk.StringVar(value="Squat: --")
-        squat_label = ttk.Label(self.window, textvariable=self.squat_status_var, font=("Arial", 16))
-        squat_label.pack(pady=10)
+        self.tracking_status_var = tk.StringVar(value="Tracking: --")
+        # -------------------------
+        # Handle / Bar height tracking
+        # -------------------------
+        self.bar_y_ref = None              # Referenz-y (Stand) in Pixel
+        self.bar_height_px = None          # aktuelle Höhe relativ zur Referenz (Pixel)
 
-        # Start-Button
+        self.bar_height_var = tk.StringVar(value="Bar height: -- px")
+        ttk.Label(self.window, textvariable=self.bar_height_var, font=("Arial", 16)).pack(pady=10)
+
+
+        ttk.Label(self.window, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.window, textvariable=self.knee_angle_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.window, textvariable=self.squat_status_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.window, textvariable=self.tracking_status_var, font=("Arial", 14)).pack(pady=6)
+
         self.is_measuring = False
-        start_button = ttk.Button(self.window, text="Start measurement", command=self.start_measurement)
-        start_button.pack(pady=10)
+        ttk.Button(self.window, text="Start measurement", command=self.start_measurement).pack(pady=10)
+        ttk.Button(self.window, text="Stop measurement", command=self.stop_measurement).pack(pady=5)
 
-        # Optional: Stop-Button
-        stop_button = ttk.Button(self.window, text="Stop measurement", command=self.stop_measurement)
-        stop_button.pack(pady=5)
+        # -------------------------
+        # Squat Counter / State Machine
+        # -------------------------
+        self.rep_count = 0
+        self.rep_count_var = tk.StringVar(value="Valid squats: 0")
+        ttk.Label(self.window, textvariable=self.rep_count_var, font=("Arial", 16)).pack(pady=10)
+        # --- Sound on valid squat (checkbox) ---
+        self.sound_enabled_var = tk.BooleanVar(value=True)  # default an (oder False, wie du willst)
+        ttk.Checkbutton(self.window, text="Sound on valid squat", variable=self.sound_enabled_var).pack(pady=6)
 
-        # --- Kamera Setup ---
+
+        # Hysterese (gegen Flackern)
+        self.depth_ok_threshold = -2.0     # <= -> OK (tief genug)
+        self.depth_high_threshold = 2.0   # >= -> HIGH (zu hoch)
+
+        # Mindestdauer (Frames) für stabile Zustände
+        self.stable_frames_required = 5
+
+        # interne Zähler
+        self._ok_streak = 0
+        self._high_streak = 0
+
+        # Zustände: "READY" (oben), "BOTTOM" (unten stabil erreicht)
+        self._squat_state = "READY"
+
+        # -------------------------
+        # Kamera Setup
+        # -------------------------
         self.cap = cv2.VideoCapture(camera_index)
         if not self.cap.isOpened():
             print("❌ Cannot open camera")
@@ -63,53 +111,73 @@ class SquatAnalysisApp:
         self.update_interval = 40
         print(f"GUI update interval (ms): {self.update_interval}")
 
-        # Letzte Marker-Zentren speichern (für Visualisierung)
+        # -------------------------
+        # ArUco Tracker (ausgelagert)
+        # -------------------------
+        tracker_cfg = ArucoTrackerConfig(
+            dictionary=cv2.aruco.DICT_6X6_250,
+            update_interval_ms=self.update_interval,
+            max_gap_seconds=1.0,  # 1s Toleranz für verdeckte Marker
+        )
+        self.tracker = ArucoTracker(tracker_cfg)
+
+        # Letzte Marker-Zentren (für Zeichnung)
         self.last_centers = {}
 
-        # --- ArUco Setup ---
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        # -------------------------
+        # Knee angle buffer (last X seconds)
+        # -------------------------
+        self.knee_angle_buffer = deque(maxlen=150)  # 6 Sekunden @ ~25 fps
+        # -------------------------
+        # Matplotlib plot (embedded)
+        # -------------------------
+        self.fig = Figure(figsize=(6, 2.5), dpi=100)
+        self.ax = self.fig.add_subplot(111)
 
-        params = cv2.aruco.DetectorParameters()
+        self.ax.set_title("Knee Angle (last 6 seconds)")
+        self.ax.set_xlabel("Time (frames)")
+        self.ax.set_ylabel("Angle (deg)")
+        self.ax.set_ylim(0, 180)
+        self.ax.set_xlim(0, 150)
+        self.ax.grid(True)
 
-        # Etwas großzügigere Threshold-Fenster
-        params.adaptiveThreshWinSizeMin = 3
-        params.adaptiveThreshWinSizeMax = 23
-        params.adaptiveThreshWinSizeStep = 10
-        params.adaptiveThreshConstant = 7
+        self.knee_line, = self.ax.plot([], [], color="blue", linewidth=2)
 
-        # Markerrand-Anforderungen (wenn Marker kleiner sind, Min-Rate runtersetzen)
-        params.minMarkerPerimeterRate = 0.02
-        params.maxMarkerPerimeterRate = 4.0
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.window)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=10)
 
-        # Abstand der Ecken
-        params.minCornerDistanceRate = 0.02
 
-        # Ecken genauer verfeinern
-        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-
-        self.aruco_params = params
-        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-
-        # Zum sauberen Beenden
+        # sauberes Beenden
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ------------------------------------------------------------------
     # GUI Steuerung
     # ------------------------------------------------------------------
     def start_measurement(self):
-        """Wird beim Klick auf den Start-Button aufgerufen."""
         if not self.is_measuring:
+            self.tracker.reset()
+            self.bar_y_ref = None
+            self.bar_height_px = None
+            self.bar_height_var.set("Bar height: -- px")
+
+
+            # counter/state reset (optional aber sinnvoll)
+            self.rep_count = 0
+            self.rep_count_var.set("Valid squats: 0")
+            self._squat_state = "READY"
+            self._ok_streak = 0
+            self._high_streak = 0
+
             self.is_measuring = True
-            self.update_loop()  # ersten Durchlauf starten
+            self.update_loop()
             print("Measurement started")
 
     def stop_measurement(self):
-        """Messung stoppen."""
         self.is_measuring = False
         print("Measurement stopped")
 
     def on_close(self):
-        """Fenster schließen -> Ressourcen freigeben."""
         self.is_measuring = False
         if self.cap.isOpened():
             self.cap.release()
@@ -117,207 +185,282 @@ class SquatAnalysisApp:
         self.window.destroy()
 
     def run(self):
-        """Tkinter-Hauptloop starten."""
         self.window.mainloop()
 
     # ------------------------------------------------------------------
-    # Hauptprozess: 1) Frame holen 2) Marker finden 3) Winkel 4) GUI updaten
+    # Hauptloop
     # ------------------------------------------------------------------
     def update_loop(self):
-        """Ein Schritt des Messloops. Wird über window.after() regelmäßig aufgerufen."""
         if not self.is_measuring:
-            return  # nichts tun, wenn Messung pausiert ist
-
-        ret, frame = self.cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            # in 100 ms nochmal versuchen
-            self.window.after(100, self.update_loop)
             return
 
-        femur_angle, knee_angle, squat_depth_angle = self.process_frame(frame)
+        try:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("Failed to grab frame")
+                self.window.after(100, self.update_loop)
+                return
 
-        # Anatomischen Femur-Segmentwinkel anzeigen
-        if femur_angle is not None:
-            self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °")
-        else:
-            self.femur_angle_var.set("Femur angle: -- °")
+            femur_angle, knee_angle, squat_depth_angle, bar_height_px = self.process_frame(frame)
 
-        # Knie-Winkel anzeigen
-        if knee_angle is not None:
-            self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °")
-        else:
-            self.knee_angle_var.set("Knee angle: -- °")
+            # Tracking Status updaten (basierend auf last_centers)
+            self.update_tracking_status(self.last_centers)
 
-        # Squat approval basierend auf Squat-Depth-Winkel
-        if squat_depth_angle is not None:
-            if squat_depth_angle <= 0:   # 0° und tiefer = OK
-                self.squat_status_var.set("Squat: ✅ depth OK")
+            # GUI Winkel
+            if femur_angle is not None:
+                self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °")
             else:
+                self.femur_angle_var.set("Femur angle: -- °")
+
+            if knee_angle is not None:
+                self.knee_angle_var.set(f"Knee angle: {knee_angle:.1f} °")
+            else:
+                self.knee_angle_var.set("Knee angle: -- °")
+            # --- Knee angle buffer update ---
+            if knee_angle is not None:
+                self.knee_angle_buffer.append(knee_angle)
+            else:
+                # Optional: Lücke (verhindert Zacken)
+                self.knee_angle_buffer.append(float("nan"))
+            # --- Bar height GUI update ---
+            if bar_height_px is not None:
+                self.bar_height_var.set(f"Bar height: {bar_height_px:.1f} px")
+            else:
+                self.bar_height_var.set("Bar height: -- px")
+
+
+            # --- Update knee angle plot ---
+            y_data = list(self.knee_angle_buffer)
+            x_data = list(range(len(y_data)))
+
+            self.knee_line.set_data(x_data, y_data)
+            self.ax.set_xlim(0, max(150, len(y_data)))
+            self.canvas.draw_idle()
+
+
+            # --- Stabilisierung + Statusanzeige + Counter ---
+            depth_class, ok_stable, high_stable = self.update_depth_stability(squat_depth_angle)
+
+            # Anzeige (mit borderline)
+            if depth_class is None:
+                self.squat_status_var.set("Squat: --")
+            elif depth_class == "OK":
+                self.squat_status_var.set("Squat: ✅ depth OK")
+            elif depth_class == "HIGH":
                 self.squat_status_var.set("Squat: ❌ too high")
-        else:
-            self.squat_status_var.set("Squat: --")
+            else:
+                self.squat_status_var.set("Squat: ⚠ borderline")
 
-        # --- Boden-Referenzlinie ---
-        height, width, _ = frame.shape
-        y_floor = int(height * 0.8)
-        cv2.line(frame, (0, y_floor), (width, y_floor), (0, 255, 0), 2)
+            # Wenn kein Depth-Signal (z.B. Marker fehlen), State zurücksetzen
+            if depth_class is None:
+                self._squat_state = "READY"
 
-        # --- Segmente einzeichnen, falls Marker da ---
-        has_hip = self.MARKER_HIP_ID in self.last_centers
-        has_knee = self.MARKER_KNEE_ID in self.last_centers
-        has_ankle = self.MARKER_ANKLE_ID in self.last_centers
+            # State Machine fürs Zählen:
+            # READY -> BOTTOM wenn unten stabil erreicht
+            if self._squat_state == "READY":
+                if ok_stable:
+                    self._squat_state = "BOTTOM"
 
-        if has_hip:
-            hip = self.last_centers[self.MARKER_HIP_ID]
-            hip_pt = (int(hip[0]), int(hip[1]))
-            cv2.circle(frame, hip_pt, 6, (0, 0, 255), -1)   # Hüfte = rot
+            # BOTTOM -> READY (+1) wenn wieder oben stabil erreicht
+            elif self._squat_state == "BOTTOM":
+                if high_stable:
+                    self.rep_count += 1
+                    self.rep_count_var.set(f"Valid squats: {self.rep_count}")
 
-        if has_knee:
-            knee = self.last_centers[self.MARKER_KNEE_ID]
-            knee_pt = (int(knee[0]), int(knee[1]))
-            cv2.circle(frame, knee_pt, 6, (255, 0, 0), -1)  # Knie = blau
+                    # ✅ SOUND TRIGGER
+                    self.play_valid_squat_sound()
 
-        if has_ankle:
-            ankle = self.last_centers[self.MARKER_ANKLE_ID]
-            ankle_pt = (int(ankle[0]), int(ankle[1]))
-            cv2.circle(frame, ankle_pt, 6, (0, 255, 0), -1)  # Knöchel = grün
-
-        # Oberschenkel (Hüfte -> Knie) = rote Linie
-        if has_hip and has_knee:
-            cv2.line(frame, hip_pt, knee_pt, (0, 0, 255), 2)
-
-        # Unterschenkel (Knie -> Knöchel) = grüne Linie
-        if has_knee and has_ankle:
-            cv2.line(frame, knee_pt, ankle_pt, (0, 255, 0), 2)
+                    self._squat_state = "READY"
 
 
-        # Frame mit eingezeichneten Markern anzeigen
-        cv2.imshow("Squat Camera", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Boden-Referenzlinie
+            height, width, _ = frame.shape
+            y_floor = int(height * 0.8)
+            cv2.line(frame, (0, y_floor), (width, y_floor), (0, 255, 0), 2)
+
+            # Segmente zeichnen
+            self.draw_segments(frame)
+
+            # Overlay im Video (optional hilfreich)
+            cv2.putText(frame, f"Reps: {self.rep_count}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+            cv2.putText(frame, f"State: {self._squat_state}", (10, 65),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+
+            # Frame anzeigen
+            cv2.imshow("Squat Camera", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                self.stop_measurement()
+
+            self.window.after(self.update_interval, self.update_loop)
+
+        except Exception as e:
+            # robustes Verhalten: stop + anzeigen
+            print(f"❌ Error in update_loop: {e}")
+            self.squat_status_var.set("Squat: ERROR (see console)")
             self.stop_measurement()
 
-        # Nächsten Schritt planen
-        self.window.after(self.update_interval, self.update_loop)
-
     # ------------------------------------------------------------------
-    # Bildverarbeitung & Winkelberechnung
+    # Prozess: Marker -> Winkel
     # ------------------------------------------------------------------
     def process_frame(self, frame):
-        """Detektiert ArUco-Marker im Frame und berechnet die Winkel."""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        centers = self.tracker.update(frame, draw=True)
+        self.last_centers = centers
 
-        corners, ids, _ = self.aruco_detector.detectMarkers(gray)
+        # --- Bar height computation (relative to start position) ---
+        if self.MARKER_BAR_ID in centers:
+            bar_y = float(centers[self.MARKER_BAR_ID][1])
 
-        if ids is not None:
-            # Marker anzeigen
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+            # Referenz beim ersten gültigen Frame setzen
+            if self.bar_y_ref is None:
+                self.bar_y_ref = bar_y
 
-            # Neue sichtbare Marker sammeln
-            centers = {}
-            for i, marker_id in enumerate(ids.flatten()):
-                pts = corners[i][0]           # 4 Eckpunkte
-                center = pts.mean(axis=0)     # Mittelpunkt
-                centers[int(marker_id)] = center
-
-            # Sichtbare Marker in last_valid_centers aktualisieren
-            for mid, c in centers.items():
-                self.last_valid_centers[mid] = c
-
-            # Nutze alle bekannten Marker (sichtbar + zuletzt gültig)
-            all_centers = self.last_valid_centers.copy()
-
+            self.bar_height_px = bar_y - self.bar_y_ref  # >0 wenn bar nach unten (tiefer = größerer y-Wert)
         else:
-            # Keine Marker erkannt → fallback auf last_valid_centers
-            all_centers = self.last_valid_centers.copy()
-
-        # Für Visualisierung speichern
-        self.last_centers = all_centers
-
-        # Winkel berechnen
-        femur_segment_angle = self.compute_femur_segment_angle(all_centers)
-        squat_depth_angle = self.compute_squat_depth_angle(all_centers)
-        knee_angle = self.compute_knee_angle(all_centers)
-
-        return femur_segment_angle, knee_angle, squat_depth_angle
+            # wenn BAR fehlt: lasse letzten Wert stehen (oder setze None, je nachdem was du willst)
+            self.bar_height_px = self.bar_height_px
 
 
-    def compute_femur_segment_angle(self, centers):
+        femur_angle = femur_segment_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
+        depth_angle = squat_depth_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
+        knee_angle = knee_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID, self.MARKER_ANKLE_ID)
+
+        return femur_angle, knee_angle, depth_angle, self.bar_height_px
+
+    # ------------------------------------------------------------------
+    # Depth Stability / Hysterese + Mindestdauer
+    # ------------------------------------------------------------------
+    def update_depth_stability(self, depth_angle):
         """
-        Anatomischer Femur-Segmentwinkel relativ zur Horizontalen.
-        0°  -> Femur horizontal
-        +90°/-90° -> vertikal
+        Liefert:
+        - depth_class: "OK" / "HIGH" / "MID" / None
+        - ok_stable: True wenn OK mindestens stable_frames_required Frames
+        - high_stable: True wenn HIGH mindestens stable_frames_required Frames
         """
-        if (self.MARKER_HIP_ID not in centers) or (self.MARKER_KNEE_ID not in centers):
-            return None
+        if depth_angle is None:
+            self._ok_streak = 0
+            self._high_streak = 0
+            return None, False, False
 
-        hip = centers[self.MARKER_HIP_ID]
-        knee = centers[self.MARKER_KNEE_ID]
+        if depth_angle <= self.depth_ok_threshold:
+            depth_class = "OK"
+            self._ok_streak += 1
+            self._high_streak = 0
+        elif depth_angle >= self.depth_high_threshold:
+            depth_class = "HIGH"
+            self._high_streak += 1
+            self._ok_streak = 0
+        else:
+            depth_class = "MID"
+            self._ok_streak = 0
+            self._high_streak = 0
 
-        vec = knee - hip  # [dx, dy]
-        dx = vec[0]
-        dy = -vec[1]  # Bild-y nach oben drehen
-
-        angle_rad = np.arctan2(dy, dx)
-        angle_deg = np.degrees(angle_rad)
-        return angle_deg
-
-    def compute_squat_depth_angle(self, centers):
+        ok_stable = self._ok_streak >= self.stable_frames_required
+        high_stable = self._high_streak >= self.stable_frames_required
+        return depth_class, ok_stable, high_stable
+    
+    # ------------------------------------------------------------------
+    # Sound bei gültigem Squat
+    # ------------------------------------------------------------------
+    def play_valid_squat_sound(self):
         """
-        Squat-Depth-Winkel:
-        0°  -> Hüfte und Knie auf gleicher Höhe (Femur waagrecht)
-        <0° -> Hüfte unter Knie (guter, tiefer Squat)
-        >0° -> Hüfte über Knie (zu hoch)
+        Spielt einen kurzen Sound ab (wenn verfügbar).
         """
-        if (self.MARKER_HIP_ID not in centers) or (self.MARKER_KNEE_ID not in centers):
-            return None
+        if not self.sound_enabled_var.get():
+            return
 
-        hip = centers[self.MARKER_HIP_ID]   # [x_hip, y_hip]
-        knee = centers[self.MARKER_KNEE_ID] # [x_knee, y_knee]
+        # Windows-Beep (am zuverlässigsten ohne externe libs)
+        if winsound is not None:
+            # frequency Hz, duration ms
+            winsound.Beep(880, 150)
+            return
 
-        vec = knee - hip
-        femur_len = np.linalg.norm(vec)
-        if femur_len == 0:
-            return None
+        # Fallback: Terminal bell (kann funktionieren, je nach System/Terminal)
+        sys.stdout.write("\a")
+        sys.stdout.flush()
 
-        # y-Koordinate: nach unten positiv
-        dy = knee[1] - hip[1]  # >0: Knie tiefer als Hüfte (Hüfte höher); <0 umgekehrt
 
-        ratio = np.clip(dy / femur_len, -1.0, 1.0)
-        angle_rad = np.arcsin(ratio)
-        angle_deg = np.degrees(angle_rad)
+    # ------------------------------------------------------------------
+    # Tracking Status
+    # ------------------------------------------------------------------
+    def update_tracking_status(self, centers: dict):
+        required = {
+            self.MARKER_HIP_ID: "HIP",
+            self.MARKER_KNEE_ID: "KNEE",
+            self.MARKER_ANKLE_ID: "ANKLE",
+            self.MARKER_BAR_ID: "BAR",
+        }
 
-        return angle_deg
+        present = [mid for mid in required.keys() if mid in centers]
+        missing = [required[mid] for mid in required.keys() if mid not in centers]
 
-    def compute_knee_angle(self, centers):
-        """
-        Knie-Winkel als Winkel zwischen Femur- und Unterschenkelvektor.
-        Wir nehmen den Winkel zwischen
-        - V1: Knie -> Hüfte
-        - V2: Knie -> Knöchel
-        """
-        if (self.MARKER_HIP_ID not in centers or
-                self.MARKER_KNEE_ID not in centers or
-                self.MARKER_ANKLE_ID not in centers):
-            return None
+        if len(present) == 3:
+            status = "OK"
+        elif len(present) == 2:
+            status = "DEGRADED"
+        elif len(present) == 1:
+            status = "WEAK"
+        else:
+            status = "LOST"
 
-        hip = centers[self.MARKER_HIP_ID]
-        knee = centers[self.MARKER_KNEE_ID]
-        ankle = centers[self.MARKER_ANKLE_ID]
+        if missing:
+            self.tracking_status_var.set(f"Tracking: {status}  (missing: {', '.join(missing)})")
+        else:
+            self.tracking_status_var.set("Tracking: OK  (3/3 markers)")
 
-        v1 = hip - knee    # Femur-Richtung
-        v2 = ankle - knee  # Unterschenkel-Richtung
+    # ------------------------------------------------------------------
+    # Visualisierung (Linien/Punkte)
+    # ------------------------------------------------------------------
+    def draw_segments(self, frame):
+        centers = self.last_centers
 
-        # Kosinus des Winkels
-        dot = float(np.dot(v1, v2))
-        norm_prod = np.linalg.norm(v1) * np.linalg.norm(v2)
-        if norm_prod == 0:
-            return None
+        hip_pt = knee_pt = ankle_pt = None
 
-        cos_angle = np.clip(dot / norm_prod, -1.0, 1.0)
-        angle_rad = np.arccos(cos_angle)
-        angle_deg = np.degrees(angle_rad)
-        return angle_deg
+        has_hip = self.MARKER_HIP_ID in centers
+        has_knee = self.MARKER_KNEE_ID in centers
+        has_ankle = self.MARKER_ANKLE_ID in centers
+        has_bar = self.MARKER_BAR_ID in centers
+
+
+        if has_hip:
+            hip = centers[self.MARKER_HIP_ID]
+            hip_pt = (int(hip[0]), int(hip[1]))
+            cv2.circle(frame, hip_pt, 6, (0, 0, 255), -1)  # rot
+
+        if has_knee:
+            knee = centers[self.MARKER_KNEE_ID]
+            knee_pt = (int(knee[0]), int(knee[1]))
+            cv2.circle(frame, knee_pt, 6, (255, 0, 0), -1)  # blau
+
+        if has_ankle:
+            ankle = centers[self.MARKER_ANKLE_ID]
+            ankle_pt = (int(ankle[0]), int(ankle[1]))
+            cv2.circle(frame, ankle_pt, 6, (0, 255, 0), -1)  # grün
+
+
+        # Oberschenkel rot
+        if has_hip and has_knee and hip_pt and knee_pt:
+            cv2.line(frame, hip_pt, knee_pt, (0, 0, 255), 2)
+
+        # Unterschenkel grün
+        if has_knee and has_ankle and knee_pt and ankle_pt:
+            cv2.line(frame, knee_pt, ankle_pt, (0, 255, 0), 2)
+
+        # Bar/Handle Marker (ID 43) = gelb + horizontale Linie
+        if has_bar:
+            bar = centers[self.MARKER_BAR_ID]
+            bar_pt = (int(bar[0]), int(bar[1]))
+
+            # Punkt
+            cv2.circle(frame, bar_pt, 7, (0, 255, 255), -1)  # gelb (BGR)
+
+            # horizontale Linie auf Bar-Höhe
+            h, w, _ = frame.shape
+            cv2.line(frame, (0, bar_pt[1]), (w, bar_pt[1]), (0, 255, 255), 2)
+
+            # Label
+            cv2.putText(frame, "BAR (43)", (bar_pt[0] + 10, bar_pt[1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
 
 if __name__ == "__main__":
