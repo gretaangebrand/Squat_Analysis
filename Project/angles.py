@@ -92,6 +92,20 @@ def knee_angle_deg(
     angle_rad = np.arccos(cos_angle)
     return float(np.degrees(angle_rad))
 
+
+def knee_valid_angle_deg(centers, hip_id, knee_id, ankle_id, reference_deg=90.0):
+    """
+    Valid/functional knee angle:
+    0° at reference_deg (default 90° anatomical),
+    positive = higher squat (more extended),
+    negative = deeper squat (more flexed).
+    """
+    anat = knee_angle_deg(centers, hip_id, knee_id, ankle_id)
+    if anat is None:
+        return None
+    return anat - reference_deg
+
+
 def update_depth_stability(self, depth_angle):
     """
     Updatet Streaks und liefert:
