@@ -285,11 +285,17 @@ class SquatAnalysisApp:
 
             # GUI Winkel
             self.femur_angle_var.set(f"Femur angle: {femur_angle:.1f} °" if femur_angle is not None else "Femur angle: -- °")
-            self.knee_valid_angle_var.set(f"Knee angle: {knee_angle:.1f} °" if knee_angle is not None else "Knee angle: -- °")
+            self.knee_valid_angle_var.set(f"Knee angle: {knee_valid:.1f} °" if knee_valid is not None else "Knee angle: -- °")
             self.bar_height_var.set(f"Bar height: {bar_height_px:.1f} px" if bar_height_px is not None else "Bar height: -- px")
 
             # --- Stabilisierung + Statusanzeige + Counter ---
-            depth_class, ok_stable, high_stable = self.update_depth_stability(squat_depth_angle)
+            cls, ok_stable, high_stable = self.update_validity_stability(squat_depth_angle, knee_valid)
+
+            # Tracking status text (für Overlay)
+            tracking_text = self.tracking_status_var.get() if hasattr(self, "tracking_status_var") else None
+
+            # Live-Farbfeedback ins Kamerabild
+            self.draw_live_feedback(frame, cls, tracking_text=tracking_text)
 
             # Cooldown runterzählen
             if self._cooldown_frames > 0:
@@ -460,94 +466,39 @@ class SquatAnalysisApp:
             self.ax_bar.set_ylim(0, 300)
 
         self.canvas.draw_idle()
+    
+    def update_validity_stability(self, squat_depth_angle, knee_valid):
+        """
+        Kombinierte Stabilisierung:
+        - squat_depth_angle <= 0
+        - knee_valid <= 0
+        """
 
-
-    # ------------------------------------------------------------------
-    # Depth stability / hysterese + minimum duration
-    # ------------------------------------------------------------------
-    def update_depth_stability(self, depth_angle):
-        if depth_angle is None:
+        if squat_depth_angle is None or knee_valid is None:
             self._ok_streak = 0
             self._high_streak = 0
             return None, False, False
 
-        if depth_angle <= self.depth_ok_threshold:
-            depth_class = "OK"
+        # gültig
+        if squat_depth_angle <= 0 and knee_valid <= 0:
             self._ok_streak += 1
             self._high_streak = 0
-        elif depth_angle >= self.depth_high_threshold:
-            depth_class = "HIGH"
+        else:
             self._high_streak += 1
             self._ok_streak = 0
-        else:
-            depth_class = "MID"
-            self._ok_streak = 0
-            self._high_streak = 0
 
         ok_stable = self._ok_streak >= self.stable_frames_required
         high_stable = self._high_streak >= self.stable_frames_required
-        return depth_class, ok_stable, high_stable
-    
-    def update_validity_stability(self, depth_angle, knee_valid):
-        """
-        Kombiniert Depth + Knee_valid zu einer stabilen Klassifikation.
-        Liefert:
-        - cls: None / "OK" / "HIGH" / "MID"
-        - ok_stable: True/False
-        - high_stable: True/False
-        """
 
-        # Wenn Depth fehlt -> keine sichere Klassifikation (Tracking/Marker)
-        if depth_angle is None:
-            self._ok_streak = 0
-            self._high_streak = 0
-            self._knee_ok_streak = 0
-            self._knee_high_streak = 0
-            return None, False, False
-
-        # Depth-Klasse (mit Hysterese)
-        if depth_angle <= self.depth_ok_threshold:
-            depth_cls = "OK"
-        elif depth_angle >= self.depth_high_threshold:
-            depth_cls = "HIGH"
-        else:
-            depth_cls = "MID"
-
-        # Knee-Klasse (falls verfügbar)
-        if knee_valid is None:
-            knee_cls = "MID"   # konservativ: ohne Knieinfo nicht "OK" zählen
-        else:
-            if knee_valid <= self.knee_ok_threshold:
-                knee_cls = "OK"
-            elif knee_valid >= self.knee_high_threshold:
-                knee_cls = "HIGH"
-            else:
-                knee_cls = "MID"
-
-        # Kombi-Entscheidung (konservativ)
-        # OK nur wenn beide OK
-        if depth_cls == "OK" and knee_cls == "OK":
+        if ok_stable:
             cls = "OK"
-        # HIGH wenn entweder klar HIGH (zu hoch)
-        elif depth_cls == "HIGH" or knee_cls == "HIGH":
+        elif high_stable:
             cls = "HIGH"
         else:
-            cls = "MID"
+            cls = "TRANSITION"
 
-        # Streak-Update (stabilisieren)
-        if cls == "OK":
-            self._ok_streak += 1
-            self._high_streak = 0
-        elif cls == "HIGH":
-            self._high_streak += 1
-            self._ok_streak = 0
-        else:
-            self._ok_streak = 0
-            self._high_streak = 0
-
-        ok_stable = self._ok_streak >= self.stable_frames_required
-        high_stable = self._high_streak >= self.stable_frames_required
         return cls, ok_stable, high_stable
+
 
 
     # ------------------------------------------------------------------
@@ -624,6 +575,47 @@ class SquatAnalysisApp:
             cv2.line(frame, (0, bar_pt[1]), (w, bar_pt[1]), (0, 255, 255), 2)
             cv2.putText(frame, "BAR (43)", (bar_pt[0] + 10, bar_pt[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+    def draw_live_feedback(self, frame, cls, tracking_text=None):
+        """
+        Draws a colored status box + text overlay on the camera frame.
+        cls: None / "OK" / "HIGH" / "MID" / "TRANSITION" (je nach deiner update_validity_stability)
+        """
+
+        # Farben (BGR!)
+        if cls == "OK":
+            color = (0, 200, 0)       # grün
+            text = "VALID (OK)"
+        elif cls == "HIGH":
+            color = (0, 0, 255)       # rot
+            text = "TOO HIGH"
+        elif cls in ("MID", "TRANSITION", "BORDERLINE"):
+            color = (0, 215, 255)     # gelb/orange
+            text = "BORDERLINE"
+        else:
+            color = (180, 0, 180)     # violett
+            text = "TRACKING LOST"
+
+        h, w = frame.shape[:2]
+
+        # Hintergrundbox (oben links)
+        x1, y1 = 10, 10
+        x2, y2 = 330, 70
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, -1)
+
+        # Text in die Box (weiß)
+        cv2.putText(frame, text, (x1 + 10, y1 + 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Optional: Tracking-Text darunter
+        if tracking_text:
+            cv2.putText(frame, tracking_text, (10, 95),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+
+        # Optional: Rahmen ums ganze Bild (starker visueller Hinweis)
+        cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, 6)
+
+
 
     # ------------------------------------------------------------------
     # Histogram rendering (called on stop)
