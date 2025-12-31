@@ -79,60 +79,53 @@ class ArucoTracker:
         self.last_seen_frame.clear()
 
     def update(self, frame: np.ndarray, draw: bool = True) -> Dict[int, np.ndarray]:
-        """
-        Nimmt ein BGR-Frame und liefert centers zurück:
-        {marker_id: np.array([x, y])}
-        """
         self.frame_counter += 1
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         corners, ids, _ = self.detector.detectMarkers(gray)
 
+        # centers für diese Frame-Detektion
+        detected_centers: Dict[int, np.ndarray] = {}
+        mm_per_px_candidates = []
+
         if ids is not None and len(ids) > 0:
             if draw:
                 cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 
-            # sichtbare Marker → Mittelpunkte + State Update
             for i, marker_id in enumerate(ids.flatten()):
                 pts = corners[i][0]              # (4,2)
                 center = pts.mean(axis=0)        # (2,)
                 mid = int(marker_id)
 
+                # centers + state
+                detected_centers[mid] = center
                 self.last_valid_centers[mid] = center
                 self.last_seen_frame[mid] = self.frame_counter
 
-            mm_per_px_candidates = []
-
-            for i, marker_id in enumerate(ids.flatten()):
-                pts = corners[i][0]  # 4x2
-                center = pts.mean(axis=0)
-                centers[int(marker_id)] = center
-
+                # Skala
                 mmpp = self._estimate_mm_per_px_from_corners(pts)
                 if mmpp is not None:
                     mm_per_px_candidates.append(mmpp)
 
-            # robuste Skala: Median (weniger empfindlich auf Ausreißer)
+            # robuste Skala: Median + EMA
             if mm_per_px_candidates:
                 mm_per_px = float(np.median(mm_per_px_candidates))
-
-                # Glättung (EMA) damit es nicht flackert
-                alpha = 0.2  # 0.1..0.3 sinnvoll
+                alpha = 0.2
                 if self._mm_per_px_ema is None:
                     self._mm_per_px_ema = mm_per_px
                 else:
                     self._mm_per_px_ema = (1 - alpha) * self._mm_per_px_ema + alpha * mm_per_px
-
                 self.mm_per_px = self._mm_per_px_ema
 
-
-        # Toleranz anwenden: nur Marker, die <= max_gap_frames "alt" sind
-        centers: Dict[int, np.ndarray] = {}
+        # Toleranz anwenden: nur Marker, die <= max_gap_frames alt sind
+        centers_out: Dict[int, np.ndarray] = {}
         for mid, center in self.last_valid_centers.items():
             last_frame = self.last_seen_frame.get(mid, -10**9)
             if (self.frame_counter - last_frame) <= self.max_gap_frames:
-                centers[mid] = center
-        return centers
+                centers_out[mid] = center
+
+        return centers_out
+
 
     # Abschätzung mm/px aus sichtbaren Markern
     def _estimate_mm_per_px_from_corners(self, marker_corners_px, marker_size_mm=MARKER_SIZE_MM):
