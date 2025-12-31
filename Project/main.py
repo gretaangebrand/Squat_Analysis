@@ -71,7 +71,7 @@ class SquatAnalysisApp:
         # Handle / Bar height tracking
         self.bar_y_ref = None
         self.bar_height_px = None
-        self.bar_height_var = tk.StringVar(value="Bar height: -- px")
+        self.bar_height_var = tk.StringVar(value="Bar height: -- cm")
 
         ttk.Label(self.tab_live, textvariable=self.bar_height_var, font=("Arial", 16)).pack(pady=10)
         ttk.Label(self.tab_live, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(pady=10)
@@ -179,7 +179,7 @@ class SquatAnalysisApp:
 
         self.ax_bar.set_title(f"Bar Height (last {WINDOW_SECONDS} seconds)")
         self.ax_bar.set_xlabel("Time (s)")
-        self.ax_bar.set_ylabel("Depth (px)")
+        self.ax_bar.set_ylabel("Height (cm)")
         self.ax_bar.set_xlim(-WINDOW_SECONDS, 0)
         self.ax_bar.set_ylim(0, 300)
         self.ax_bar.grid(True)
@@ -210,7 +210,7 @@ class SquatAnalysisApp:
 
         # "Standpose" & "movement" thresholds (px)
         self.stand_depth_threshold_px = 10.0   # ab hier gilt: nicht mehr Standphase --> EVTL noch anpassen
-        self.motion_threshold_px = 1.5         # minimale Änderung zwischen Frames, um als "moving" zu zählen
+        self.motion_threshold_px = 2       # minimale Änderung zwischen Frames, um als "moving" zu zählen
 
         # Vorwert für Bewegungsdetektion
         self._prev_bar_height_px = None
@@ -236,7 +236,7 @@ class SquatAnalysisApp:
             # bar reference reset
             self.bar_y_ref = None
             self.bar_height_px = None
-            self.bar_height_var.set("Bar height: -- px")
+            self.bar_height_var.set("Bar height: -- cm")
 
             # buffers reset
             self.knee_angle_buffer.clear()
@@ -275,6 +275,7 @@ class SquatAnalysisApp:
     # Main Loop
     # ------------------------------------------------------------------
     def update_loop(self):
+
         if not self.is_measuring:
             return
 
@@ -363,7 +364,14 @@ class SquatAnalysisApp:
 
             # --- Buffers updaten ---
             self.knee_angle_buffer.append(knee_valid if knee_valid is not None else float("nan"))
-            self.bar_height_buffer.append(bar_height_px if bar_height_px is not None else float("nan"))
+
+            mm_per_px = self.tracker.mm_per_px
+            if (bar_height_px is not None) and (mm_per_px is not None):
+                bar_height_cm = (bar_height_px * mm_per_px) / 10.0
+                self.bar_height_buffer.append(bar_height_cm)
+            else:
+                self.bar_height_buffer.append(float("nan"))
+
 
 
             # --- Live Plots updaten ---
@@ -378,21 +386,24 @@ class SquatAnalysisApp:
                 if mm_per_px is not None:
                     bar_x_cm = (bar_x_px * mm_per_px) / 10.0
                     bar_y_cm = (bar_y_px * mm_per_px) / 10.0
+
+                    # Bewegung erkennen (weiterhin in px!)
+                    moving = False
+                    if (bar_height_px is not None) and (self._prev_bar_height_px is not None):
+                        if abs(bar_height_px - self._prev_bar_height_px) >= self.motion_threshold_px:
+                            moving = True
+                    self._prev_bar_height_px = bar_height_px
+
+                    # Nur Bewegungsphase sammeln (Standphase raus)
+                    if (cls is not None) and (bar_height_px > self.stand_depth_threshold_px) and moving:
+                        self.bar_path_x.append(bar_x_cm)
+                        self.bar_path_y.append(bar_y_cm)
+
                 else:
-                    bar_x_cm = bar_x_px
-                    bar_y_cm = bar_y_px
+                    # Keine Kalibrierung -> nichts sammeln (sonst px als cm gelabelt)
+                    self._prev_bar_height_px = bar_height_px
 
-                # Bewegung erkennen
-                moving = False
-                if self._prev_bar_height_px is not None:
-                    if abs(bar_height_px - self._prev_bar_height_px) >= self.motion_threshold_px:
-                        moving = True
 
-                self._prev_bar_height_px = bar_height_px
-
-                if (cls is not None) and (bar_height_px > self.stand_depth_threshold_px) and moving:
-                    self.bar_path_x.append(bar_x_cm)
-                    self.bar_path_y.append(bar_y_cm)
 
 
 
@@ -424,7 +435,16 @@ class SquatAnalysisApp:
     # Process frame: marker -> angles + bar height
     # ------------------------------------------------------------------
     def process_frame(self, frame):
-        centers = self.tracker.update(frame, draw=True)
+        centers = {}
+
+        try:
+            detected = self.tracker.update(frame, draw=True)
+            if detected is not None:
+                centers = detected
+        except Exception as e:
+            print("Tracker error:", e)
+            centers = {}
+
         self.last_centers = centers
 
         femur_angle = femur_segment_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
@@ -482,15 +502,15 @@ class SquatAnalysisApp:
             vmin = min(finite_bar)
             vmax = max(finite_bar)
             # ensure we always show at least a sensible range
-            pad = max(10.0, 0.15 * (vmax - vmin + 1e-9))
+            pad = max(1.0, 0.15 * (vmax - vmin + 1e-9))
             low = max(0.0, vmin - pad)             # depth should not go far below 0
             high = vmax + pad
-            # if you're barely moving, avoid micro-scale like 0.05 px
-            if high - low < 50:
-                high = low + 50
+            # if you're barely moving, avoid micro-scale like 5 cm
+            if high - low < 5:
+                high = low + 5
             self.ax_bar.set_ylim(low, high)
         else:
-            self.ax_bar.set_ylim(0, 300)
+            self.ax_bar.set_ylim(0, 50)
 
         self.canvas.draw_idle()
     
@@ -688,8 +708,8 @@ class SquatAnalysisApp:
             ax_main.plot(x, y, linewidth=1)  # Trajektorie darüber
 
             ax_main.set_title("Bar path (movement only, no stand phase)")
-            ax_main.set_xlabel("x (px)")
-            ax_main.set_ylabel("y (px)")
+            ax_main.set_xlabel("x (cm)")
+            ax_main.set_ylabel("y (cm)")
             ax_main.grid(True)
 
             # Optional (physikalischer Look): y-Achse invertieren, weil Bild-y nach unten wächst
