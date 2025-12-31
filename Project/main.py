@@ -147,7 +147,7 @@ class SquatAnalysisApp:
         tracker_cfg = ArucoTrackerConfig(
             dictionary=cv2.aruco.DICT_6X6_250,
             update_interval_ms=self.update_interval,
-            max_gap_seconds=1.0,
+            max_gap_seconds=0.2,  # kurze Lücken tolerieren
         )
         self.tracker = ArucoTracker(tracker_cfg)
 
@@ -181,7 +181,7 @@ class SquatAnalysisApp:
         self.ax_bar.set_xlabel("Time (s)")
         self.ax_bar.set_ylabel("Height (cm)")
         self.ax_bar.set_xlim(-WINDOW_SECONDS, 0)
-        self.ax_bar.set_ylim(0, 300)
+        self.ax_bar.set_ylim(0, 250)
         self.ax_bar.grid(True)
 
         self.fig.tight_layout()
@@ -435,17 +435,21 @@ class SquatAnalysisApp:
     # Process frame: marker -> angles + bar height
     # ------------------------------------------------------------------
     def process_frame(self, frame):
-        centers = {}
+        # Start: nehme die letzten Zentren als Basis
+        centers = dict(self.last_centers) if self.last_centers else {}
 
         try:
             detected = self.tracker.update(frame, draw=True)
-            if detected is not None:
-                centers = detected
+            # Merge: neue Detektionen überschreiben alte, aber fehlende bleiben kurz erhalten
+            if detected is not None and len(detected) > 0:
+                centers.update(detected)
         except Exception as e:
             print("Tracker error:", e)
-            centers = {}
+            # centers bleibt dann die letzte brauchbare Schätzung
 
         self.last_centers = centers
+
+
 
         femur_angle = femur_segment_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         depth_angle = squat_depth_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
