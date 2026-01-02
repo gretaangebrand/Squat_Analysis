@@ -1,14 +1,15 @@
-from __future__ import annotations
-
-from dataclasses import dataclass
+from __future__ import annotations # für Python 3.7 Kompatibilität
+from dataclasses import dataclass # Typing für Konfiguration
 from typing import Dict, Optional, Tuple
 
-import cv2
-import numpy as np
+import cv2 # OpenCV für ArUco
+import numpy as np # NumPy für numerische Operationen
 
+# Markergröße in mm
 MARKER_SIZE_MM = 90.0
 
-@dataclass
+@dataclass #automatische Initialisierung von Klasse (sammelt Konfigurationsparameter)
+# Konfigurationsklasse für ArucoTracker
 class ArucoTrackerConfig:
     dictionary: int = cv2.aruco.DICT_6X6_250
     use_corner_refine_subpix: bool = True
@@ -17,7 +18,7 @@ class ArucoTrackerConfig:
     update_interval_ms: int = 40   # entspricht deinem GUI-Tick
     max_gap_seconds: float = 1.0   # gewünschte Toleranz (1 s)
 
-    # DetectorParameters (deine aktuellen Settings)
+    # DetectorParameters (Einstellungen für die Marker-Erkennung)
     adaptiveThreshWinSizeMin: int = 3
     adaptiveThreshWinSizeMax: int = 23
     adaptiveThreshWinSizeStep: int = 10
@@ -27,7 +28,7 @@ class ArucoTrackerConfig:
     maxMarkerPerimeterRate: float = 4.0
     minCornerDistanceRate: float = 0.02
 
-
+# ArucoTracker-Klasse
 class ArucoTracker:
     """
     Verantwortlich für:
@@ -35,7 +36,7 @@ class ArucoTracker:
     - Mittelpunkte berechnen
     - 1s Toleranz: Marker dürfen kurz fehlen; danach werden sie verworfen
     """
-
+    # Initialisierung
     def __init__(self, config: Optional[ArucoTrackerConfig] = None):
         # Konfiguration
         self.cfg = config or ArucoTrackerConfig()
@@ -52,11 +53,11 @@ class ArucoTracker:
         params.maxMarkerPerimeterRate = self.cfg.maxMarkerPerimeterRate
         params.minCornerDistanceRate = self.cfg.minCornerDistanceRate
 
-        # Kalibrierungsdaten
+        # Kalibrierungsdaten, die Skala in mm/px liefern
         self.mm_per_px = None
         self._mm_per_px_ema = None  # geglättet
 
-        # Corner-Refinement
+        # Ecken verfeinern
         if self.cfg.use_corner_refine_subpix:
             params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
 
@@ -72,37 +73,42 @@ class ArucoTracker:
             1, int(round(self.cfg.max_gap_seconds * 1000.0 / self.cfg.update_interval_ms))
         )
 
+    # setzt den Tracker-State zurück, wenn Messung neu startet
     def reset(self) -> None:
         """Setzt den Tracker-State zurück (z.B. bei neuer Messung)."""
         self.frame_counter = 0
         self.last_valid_centers.clear()
         self.last_seen_frame.clear()
 
+    # Frames zählen & Marker erkennen
     def update(self, frame: np.ndarray, draw: bool = True) -> Dict[int, np.ndarray]:
         self.frame_counter += 1
 
+        # Marker in Graustufenbild erkennen
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # pro Marker werden 4 Eckpunkte als Pixel und die IDs zurückgegeben
         corners, ids, _ = self.detector.detectMarkers(gray)
 
-        # centers für diese Frame-Detektion
+        # Erkannte Marker verarbeiten
         detected_centers: Dict[int, np.ndarray] = {}
         mm_per_px_candidates = []
 
+        # Wenn Marker erkannt wurden, werden deren Mittelpunkte berechnet
         if ids is not None and len(ids) > 0:
             if draw:
                 cv2.aruco.drawDetectedMarkers(frame, corners, ids)
 
             for i, marker_id in enumerate(ids.flatten()):
                 pts = corners[i][0]              # (4,2)
-                center = pts.mean(axis=0)        # (2,)
+                center = pts.mean(axis=0)        # (2,) Durchschnitt der 4 Ecken
                 mid = int(marker_id)
 
-                # centers + state
+                # Mittelpunkt speichern und Frame-Index aktualisieren
                 detected_centers[mid] = center
                 self.last_valid_centers[mid] = center
                 self.last_seen_frame[mid] = self.frame_counter
 
-                # Skala
+                # Skala abschätzen
                 mmpp = self._estimate_mm_per_px_from_corners(pts)
                 if mmpp is not None:
                     mm_per_px_candidates.append(mmpp)
