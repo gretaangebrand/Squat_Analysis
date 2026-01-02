@@ -626,6 +626,38 @@ class SquatAnalysisApp:
             cv2.putText(frame, "BAR (43)", (bar_pt[0] + 10, bar_pt[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+    # Klasse zur Stabilitätsbewertung der Squat-Tiefe
+    def update_depth_stability(self, depth_angle):
+        """
+        Updatet Streaks und liefert:
+        - depth_class: "OK" / "HIGH" / "MID" / None
+        - ok_stable: True wenn OK lange genug
+        - high_stable: True wenn HIGH lange genug
+        """
+        if depth_angle is None:
+            self._ok_streak = 0
+            self._high_streak = 0
+            return None, False, False
+
+        # Klassifikation mit Hysterese-Band
+        if depth_angle <= self.depth_ok_threshold:
+            depth_class = "OK"
+            self._ok_streak += 1
+            self._high_streak = 0
+        elif depth_angle >= self.depth_high_threshold:
+            depth_class = "HIGH"
+            self._high_streak += 1
+            self._ok_streak = 0
+        else:
+            depth_class = "MID"
+            # in MID zählen wir keine streak hoch, sondern resetten (stabiler)
+            self._ok_streak = 0
+            self._high_streak = 0
+
+        ok_stable = self._ok_streak >= self.stable_frames_required
+        high_stable = self._high_streak >= self.stable_frames_required
+        return depth_class, ok_stable, high_stable
+
     def draw_live_feedback(self, frame, cls, tracking_text=None):
         """
         Draws a colored status box + text overlay on the camera frame.
