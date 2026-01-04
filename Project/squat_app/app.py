@@ -38,9 +38,9 @@ class SquatAnalysisApp:
     # Marker IDs (anpassen je nach Platzierung)
     MARKER_HIP_ID = 42
     MARKER_KNEE_ID = 41
-    MARKER_ANKLE_ID = 45  # kurz für boden genutzt, sollte dann wieder 40 sein und Boden was anderes und bar auch was anderes
+    MARKER_ANKLE_ID = 40  # kurz für boden genutzt, sollte dann wieder 40 sein und Boden was anderes und bar auch was anderes
     MARKER_BAR_ID = 43  # Handle/Bar marker ID NOCH ANPASSEN
-    MARKER_FLOOR_ID = 40 # Bodenmarker ID NOCH ANPASSEN
+    MARKER_FLOOR_ID = 45 # Bodenmarker ID NOCH ANPASSEN
 
 
     def __init__(self, camera_index: int = 1):
@@ -68,6 +68,7 @@ class SquatAnalysisApp:
         self.knee_valid_angle_var = tk.StringVar(value="Knee angle: -- °")
         self.squat_status_var = tk.StringVar(value="Squat: --")
         self.tracking_status_var = tk.StringVar(value="Tracking: --")
+        self._floor_marker_seen = False
 
         # Handle / Bar height tracking
         self.bar_y_ref = None
@@ -267,6 +268,7 @@ class SquatAnalysisApp:
             self._bar_ref_candidates.clear()
             self.bar_height_px = None
             self.bar_height_var.set("Bar height: -- cm")
+            self._floor_marker_seen = False
 
             # buffers reset
             self.knee_angle_buffer.clear()
@@ -413,7 +415,6 @@ class SquatAnalysisApp:
                 mm_per_px = self.tracker.mm_per_px
                 if mm_per_px is not None:
                     bar_x_cm = (bar_x_px * mm_per_px) / 10.0
-                    bar_y_cm = (bar_y_px * mm_per_px) / 10.0
 
                     # Bewegung erkennen (weiterhin in px!)
                     moving = False
@@ -502,6 +503,7 @@ class SquatAnalysisApp:
             # absolute height using FLOOR marker (ID = 44)
             mm_per_px = self.tracker.mm_per_px
             if (mm_per_px is not None) and (self.MARKER_FLOOR_ID in centers):
+                self._floor_marker_seen = True
                 floor_center_y_px = float(centers[self.MARKER_FLOOR_ID][1])
 
                 # Marker-Höhe in Pixel
@@ -779,14 +781,28 @@ class SquatAnalysisApp:
         ax_histy = self.hist_fig.add_subplot(gs[1, 1], sharey=ax_main)
 
         # --- Check data ---
-        if len(self.bar_path_x) < 10:
+        if not self._floor_marker_seen:
             ax_main.text(
                 0.5, 0.5,
-                "Not enough MOVEMENT data collected\n(check marker visibility / thresholds)",
+                "No histogram data created.\n"
+                "Floor marker (ID 44) was not detected.",
                 ha="center", va="center",
+                fontsize=12,
                 transform=ax_main.transAxes
             )
             ax_main.set_axis_off()
+
+        elif len(self.bar_path_x) < 10:
+            ax_main.text(
+                0.5, 0.5,
+                "Not enough MOVEMENT data collected.\n"
+                "Check thresholds or movement execution.",
+                ha="center", va="center",
+                fontsize=12,
+                transform=ax_main.transAxes
+            )
+            ax_main.set_axis_off()
+
         else:
             x = np.asarray(self.bar_path_x, dtype=float)
             y = np.asarray(self.bar_path_y, dtype=float)
