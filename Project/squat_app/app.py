@@ -69,18 +69,51 @@ class SquatAnalysisApp:
 
         # Handle / Bar height tracking
         self.bar_y_ref = None
+
+        # Bar reference detection 
+        self._bar_ref_locked = False
+        self._bar_ref_candidates = deque(maxlen=30)   # ~1–1.2 s bei 25 fps
+        self._bar_still_range_px = 2.0    # wie ruhig ist "ruhig" (px)
+        self._bar_ref_min_samples = 15    # min. Frames für Referenz
         self.bar_height_px = None
         self.bar_height_var = tk.StringVar(value="Bar height: -- cm")
 
-        ttk.Label(self.tab_live, textvariable=self.bar_height_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.tab_live, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.tab_live, textvariable=self.knee_valid_angle_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.tab_live, textvariable=self.squat_status_var, font=("Arial", 16)).pack(pady=10)
-        ttk.Label(self.tab_live, textvariable=self.tracking_status_var, font=("Arial", 14)).pack(pady=6)
+        # -------------------------
+        # Live Tab: 2-column layout (LEFT = variables, RIGHT = plots)
+        # -------------------------
+        self.tab_live.grid_rowconfigure(0, weight=1)
+        self.tab_live.grid_columnconfigure(0, weight=0)  # left column: compact
+        self.tab_live.grid_columnconfigure(1, weight=1)  # right column: expands
+
+        self.left_panel = ttk.Frame(self.tab_live, padding=(10, 10))
+        # --- LEFT TOP: control buttons ---
+        self.left_controls = ttk.Frame(self.left_panel)
+        self.left_controls.pack(anchor="nw", fill="x", pady=(0, 15))
 
         self.is_measuring = False
-        ttk.Button(self.tab_live, text="Start measurement", command=self.start_measurement).pack(pady=10)
-        ttk.Button(self.tab_live, text="Stop measurement", command=self.stop_measurement).pack(pady=5)
+        ttk.Button(self.left_controls,text="Start measurement",command=self.start_measurement).pack(fill="x", pady=(0, 6))
+        ttk.Button(self.left_controls,text="Stop measurement",command=self.stop_measurement).pack(fill="x")
+
+        self.right_panel = ttk.Frame(self.tab_live, padding=(10, 10))
+
+        self.left_panel.grid(row=0, column=0, sticky="nsw")
+        self.right_panel.grid(row=0, column=1, sticky="nsew")
+
+        self.right_panel.grid_rowconfigure(0, weight=1)
+        self.right_panel.grid_columnconfigure(0, weight=1)
+
+        # --- LEFT: variables + controls ---
+        ttk.Label(self.left_panel, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.left_panel, textvariable=self.knee_valid_angle_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.left_panel, textvariable=self.bar_height_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.left_panel, textvariable=self.squat_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.left_panel, textvariable=self.tracking_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+
+        #alte Buttons position
+        #self.is_measuring = False
+        #ttk.Button(self.left_panel, text="Start measurement", command=self.start_measurement).pack(fill="x", pady=(0, 6))
+        #ttk.Button(self.left_panel, text="Stop measurement", command=self.stop_measurement).pack(fill="x", pady=(0, 6))
+
 
         # Knee-valid thresholds (signierter Winkel)
         # Idee: <= 0 bedeutet "mindestens 90° Beugung" erreicht (wie du es willst)
@@ -105,15 +138,12 @@ class SquatAnalysisApp:
         # -------------------------
         self.rep_count = 0
         self.rep_count_var = tk.StringVar(value="Valid squats: 0")
-        ttk.Label(self.tab_live, textvariable=self.rep_count_var, font=("Arial", 16)).pack(pady=10)
+        ttk.Label(self.left_panel, textvariable=self.rep_count_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
 
         # Sound checkbox
         self.sound_enabled_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
-            self.tab_live,
-            text="Sound on valid squat",
-            variable=self.sound_enabled_var
-        ).pack(pady=6)
+        ttk.Checkbutton(self.left_panel,text="Sound on valid squat",variable=self.sound_enabled_var).pack(anchor="w", pady=(0, 6))
+
 
         # Hysterese
         self.depth_ok_threshold = -2.0
@@ -149,7 +179,6 @@ class SquatAnalysisApp:
             max_gap_seconds=0.2,  # kurze Lücken tolerieren
         )
         self.tracker = ArucoTracker(tracker_cfg)
-
         self.last_centers = {}
 
         # -------------------------
@@ -160,7 +189,8 @@ class SquatAnalysisApp:
 
         # -------------------------
         # ---- Live Figure ----
-        self.fig = Figure(figsize=(7, 4.5), dpi=100)
+        # ------------------------
+        self.fig = Figure(figsize=(7, 6.5), dpi=100)
 
         self.ax_knee = self.fig.add_subplot(211)
         self.knee_line, = self.ax_knee.plot([], [], linewidth=2)
@@ -185,9 +215,10 @@ class SquatAnalysisApp:
 
         self.fig.tight_layout()
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.tab_live)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.right_panel)
         self.canvas.draw()
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=10)
+        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+
 
 
         # -------------------------
@@ -204,8 +235,6 @@ class SquatAnalysisApp:
         # -------------------------
         self.bar_path_x = []
         self.bar_path_y = []
-
-
 
         # "Standpose" & "movement" thresholds (px)
         self.stand_depth_threshold_px = 10.0   # ab hier gilt: nicht mehr Standphase --> EVTL noch anpassen
@@ -245,7 +274,6 @@ class SquatAnalysisApp:
             self.bar_path_x.clear()
             self.bar_path_y.clear()
             self._prev_bar_height_px = None
-
 
             self.is_measuring = True
             self.update_loop()
@@ -323,13 +351,13 @@ class SquatAnalysisApp:
 
             # Anzeige
             if cls is None:
-                self.squat_status_var.set("Squat: --")
+                self.squat_status_var.set("Squat Status: --")
             elif cls == "OK":
-                self.squat_status_var.set("Squat: ✅ depth OK")
+                self.squat_status_var.set("Squat Status: ✅ depth OK")
             elif cls == "HIGH":
-                self.squat_status_var.set("Squat: ❌ too high")
+                self.squat_status_var.set("Squat Status: ❌ too high")
             else:
-                self.squat_status_var.set("Squat: ⚠ borderline")
+                self.squat_status_var.set("Squat Status: ⚠ borderline")
 
             # Wenn Tracking weg -> state reset (wichtig!)
             if cls is None:
@@ -456,11 +484,28 @@ class SquatAnalysisApp:
 
         # --- Bar depth (positive = going down) ---
         bar_height_px = None
+        bar_y_px = None
         if self.MARKER_BAR_ID in centers:
-            bar_y = float(centers[self.MARKER_BAR_ID][1])
-            if self.bar_y_ref is None:
-                self.bar_y_ref = bar_y
-            bar_height_px = bar_y - self.bar_y_ref  # >0 means lower than start
+            bar_y_px = float(centers[self.MARKER_BAR_ID][1])
+            #if self.bar_y_ref is None:
+            #    self.bar_y_ref = bar_y_px
+            if self.bar_y_ref is not None:
+                bar_height_px = bar_y_px - self.bar_y_ref  # >0 means lower than start
+
+        # --- Robust reference height detection (Variant A) ---
+        if not self._bar_ref_locked and bar_y_px is not None:
+            self._bar_ref_candidates.append(bar_y_px)
+
+        if len(self._bar_ref_candidates) >= self._bar_ref_min_samples:
+            y_min = min(self._bar_ref_candidates)
+            y_max = max(self._bar_ref_candidates)
+            y_range = y_max - y_min
+
+        # Bar is sufficiently still → lock reference
+        if y_range <= self._bar_still_range_px:
+            self.bar_y_ref = float(np.median(self._bar_ref_candidates))
+            self._bar_ref_locked = True
+
 
         self.bar_height_px = bar_height_px
         return femur_angle, knee_valid, depth_angle, bar_height_px
