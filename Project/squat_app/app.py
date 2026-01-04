@@ -12,8 +12,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from aruco_tracker import ArucoTracker, ArucoTrackerConfig
 from angles import femur_segment_angle_deg, squat_depth_angle_deg, knee_angle_deg, knee_valid_angle_deg
-
 from squat_app.sound import play_valid_squat_sound as _play_valid_squat_sound
+from angles import femur_angle_depth_signed_deg
 # =========================
 # Plot configuration
 # =========================
@@ -38,8 +38,10 @@ class SquatAnalysisApp:
     # Marker IDs (anpassen je nach Platzierung)
     MARKER_HIP_ID = 42
     MARKER_KNEE_ID = 41
-    MARKER_ANKLE_ID = 40
-    MARKER_BAR_ID = 43  # Handle/Bar marker
+    MARKER_ANKLE_ID = 45  # kurz für boden genutzt, sollte dann wieder 40 sein und Boden was anderes und bar auch was anderes
+    MARKER_BAR_ID = 43  # Handle/Bar marker ID NOCH ANPASSEN
+    MARKER_FLOOR_ID = 40 # Bodenmarker ID NOCH ANPASSEN
+
 
     def __init__(self, camera_index: int = 1):
         # -------------------------
@@ -69,8 +71,6 @@ class SquatAnalysisApp:
 
         # Handle / Bar height tracking
         self.bar_y_ref = None
-
-        # Bar reference detection 
         self._bar_ref_locked = False
         self._bar_ref_candidates = deque(maxlen=30)   # ~1–1.2 s bei 25 fps
         self._bar_still_range_px = 2.0    # wie ruhig ist "ruhig" (px)
@@ -263,6 +263,8 @@ class SquatAnalysisApp:
 
             # bar reference reset
             self.bar_y_ref = None
+            self._bar_ref_locked = False
+            self._bar_ref_candidates.clear()
             self.bar_height_px = None
             self.bar_height_var.set("Bar height: -- cm")
 
@@ -313,7 +315,7 @@ class SquatAnalysisApp:
                 self.window.after(100, self.update_loop)
                 return
 
-            femur_angle, knee_valid, squat_depth_angle, bar_height_px = self.process_frame(frame)
+            femur_angle, knee_valid, squat_depth_angle, bar_height_px, bar_height_abs_cm = self.process_frame(frame)
 
 
             # Tracking Status
@@ -324,12 +326,11 @@ class SquatAnalysisApp:
             self.knee_valid_angle_var.set(f"Knee angle: {knee_valid:.1f} °" if knee_valid is not None else "Knee angle: -- °")
             # Bar Höhe in cm (wenn Kalibrierung da)
             mm_per_px = self.tracker.mm_per_px
-            if (bar_height_px is not None) and (mm_per_px is not None):
-                bar_height_cm = (bar_height_px * mm_per_px) / 10.0
-                self.bar_height_var.set(f"Bar height: {bar_height_cm:.1f} cm")
+            if bar_height_abs_cm is not None:
+                self.bar_height_var.set(f"Bar height: {bar_height_abs_cm:.1f} cm")
             else:
                 self.bar_height_var.set("Bar height: -- cm")
-            
+
 
 
 
@@ -393,11 +394,11 @@ class SquatAnalysisApp:
             self.knee_angle_buffer.append(knee_valid if knee_valid is not None else float("nan"))
 
             mm_per_px = self.tracker.mm_per_px
-            if (bar_height_px is not None) and (mm_per_px is not None):
-                bar_height_cm = (bar_height_px * mm_per_px) / 10.0
-                self.bar_height_buffer.append(bar_height_cm)
+            if bar_height_abs_cm is not None:
+                self.bar_height_buffer.append(bar_height_abs_cm)
             else:
                 self.bar_height_buffer.append(float("nan"))
+
 
 
 
@@ -424,7 +425,7 @@ class SquatAnalysisApp:
                     # Nur Bewegungsphase sammeln (Standphase raus)
                     if (cls is not None) and (bar_height_px > self.stand_depth_threshold_px) and moving:
                         self.bar_path_x.append(bar_x_cm)
-                        self.bar_path_y.append(bar_y_cm)
+                        self.bar_path_y.append(bar_height_abs_cm)
 
                 else:
                     # Keine Kalibrierung -> nichts sammeln (sonst px als cm gelabelt)
@@ -478,37 +479,44 @@ class SquatAnalysisApp:
 
 
 
-        femur_angle = femur_segment_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
+        femur_angle = femur_angle_depth_signed_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         depth_angle = squat_depth_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         knee_valid = knee_valid_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID, self.MARKER_ANKLE_ID, reference_deg=90.0)
 
-        # --- Bar depth (positive = going down) ---
+        # --- Bar depth (relative, px) ---
         bar_height_px = None
         bar_y_px = None
+
+        # --- Absolute bar height above floor (cm) ---
+        bar_height_abs_cm = None
+
+        MARKER_SIZE_MM = 90.0  # Boden-ArUco ist 90x90 mm
+
         if self.MARKER_BAR_ID in centers:
             bar_y_px = float(centers[self.MARKER_BAR_ID][1])
-            #if self.bar_y_ref is None:
-            #    self.bar_y_ref = bar_y_px
+
+            # relative displacement (für movement / standphase)
             if self.bar_y_ref is not None:
-                bar_height_px = bar_y_px - self.bar_y_ref  # >0 means lower than start
+                bar_height_px = bar_y_px - self.bar_y_ref
 
-        # --- Robust reference height detection (Variant A) ---
-        if not self._bar_ref_locked and bar_y_px is not None:
-            self._bar_ref_candidates.append(bar_y_px)
+            # absolute height using FLOOR marker (ID = 44)
+            mm_per_px = self.tracker.mm_per_px
+            if (mm_per_px is not None) and (self.MARKER_FLOOR_ID in centers):
+                floor_center_y_px = float(centers[self.MARKER_FLOOR_ID][1])
 
-        if len(self._bar_ref_candidates) >= self._bar_ref_min_samples:
-            y_min = min(self._bar_ref_candidates)
-            y_max = max(self._bar_ref_candidates)
-            y_range = y_max - y_min
+                # Marker-Höhe in Pixel
+                marker_size_px = MARKER_SIZE_MM / mm_per_px
 
-        # Bar is sufficiently still → lock reference
-        if y_range <= self._bar_still_range_px:
-            self.bar_y_ref = float(np.median(self._bar_ref_candidates))
-            self._bar_ref_locked = True
+                # Unterkante des Bodenmarkers (Marker steht vertikal!)
+                floor_ground_y_px = floor_center_y_px + 0.5 * marker_size_px
+
+                # Bar-Höhe über Boden (cm)
+                bar_height_abs_cm = (floor_ground_y_px - bar_y_px) * mm_per_px / 10.0
+
 
 
         self.bar_height_px = bar_height_px
-        return femur_angle, knee_valid, depth_angle, bar_height_px
+        return femur_angle, knee_valid, depth_angle, bar_height_px, bar_height_abs_cm
 
 
     # ------------------------------------------------------------------
@@ -787,13 +795,10 @@ class SquatAnalysisApp:
             ax_main.hist2d(x, y, bins=30)
             ax_main.plot(x, y, linewidth=1)  # Trajektorie darüber
 
-            ax_main.set_title("Bar path (movement only, no stand phase)")
-            ax_main.set_xlabel("x (cm)")
-            ax_main.set_ylabel("y (cm)")
+            ax_main.set_title("Bar path during squats (movement phases)")
+            ax_main.set_xlabel("Horizontal Movement (cm)")
+            ax_main.set_ylabel("Height above floor (cm)")
             ax_main.grid(True)
-
-            # Optional (physikalischer Look): y-Achse invertieren, weil Bild-y nach unten wächst
-            ax_main.invert_yaxis()
 
             # Marginals: x oben, y rechts
             ax_histx.hist(x, bins=30)
@@ -810,8 +815,6 @@ class SquatAnalysisApp:
 
             # damit das rechte Histogramm "nach innen" zeigt
             ax_histy.invert_xaxis()
-
-        self.hist_fig.tight_layout()
 
         # --- Canvas in Histogram-Tab einbetten ---
         self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=self.tab_hist)
