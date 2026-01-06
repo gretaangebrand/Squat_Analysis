@@ -35,12 +35,12 @@ class SquatAnalysisApp:
     - Histogram Tab (wird beim Stop befüllt, Standpose herausgefiltert)
     """
 
-    # Marker IDs (anpassen je nach Platzierung)
+    # Marker IDs
     MARKER_HIP_ID = 42
     MARKER_KNEE_ID = 41
-    MARKER_ANKLE_ID = 40  # kurz für boden genutzt, sollte dann wieder 40 sein und Boden was anderes und bar auch was anderes
-    MARKER_BAR_ID = 43  # Handle/Bar marker ID NOCH ANPASSEN
-    MARKER_FLOOR_ID = 45 # Bodenmarker ID NOCH ANPASSEN
+    MARKER_ANKLE_ID = 40 
+    MARKER_BAR_ID = 38  # Handle/Bar marker ID
+    MARKER_FLOOR_ID = 39 # Bodenmarker ID 
 
 
     def __init__(self, camera_index: int = 1):
@@ -109,11 +109,6 @@ class SquatAnalysisApp:
         ttk.Label(self.left_panel, textvariable=self.bar_height_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.squat_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.tracking_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
-
-        #alte Buttons position
-        #self.is_measuring = False
-        #ttk.Button(self.left_panel, text="Start measurement", command=self.start_measurement).pack(fill="x", pady=(0, 6))
-        #ttk.Button(self.left_panel, text="Stop measurement", command=self.stop_measurement).pack(fill="x", pady=(0, 6))
 
 
         # Knee-valid thresholds (signierter Winkel)
@@ -306,7 +301,6 @@ class SquatAnalysisApp:
     # Main Loop
     # ------------------------------------------------------------------
     def update_loop(self):
-
         if not self.is_measuring:
             return
 
@@ -425,8 +419,10 @@ class SquatAnalysisApp:
 
                     # Nur Bewegungsphase sammeln (Standphase raus)
                     if (cls is not None) and (bar_height_px > self.stand_depth_threshold_px) and moving:
-                        self.bar_path_x.append(bar_x_cm)
-                        self.bar_path_y.append(bar_height_abs_cm)
+                        if bar_height_abs_cm is not None:
+                            self.bar_path_x.append(bar_x_cm)
+                            self.bar_path_y.append(bar_height_abs_cm)
+
 
                 else:
                     # Keine Kalibrierung -> nichts sammeln (sonst px als cm gelabelt)
@@ -488,6 +484,20 @@ class SquatAnalysisApp:
         bar_height_px = None
         bar_y_px = None
 
+        # --- set bar reference (lock when still) ---
+        if (not self._bar_ref_locked) and (bar_y_px is not None):
+            self._bar_ref_candidates.append(bar_y_px)
+
+            if len(self._bar_ref_candidates) >= self._bar_ref_min_samples:
+                y_min = min(self._bar_ref_candidates)
+                y_max = max(self._bar_ref_candidates)
+                y_range = y_max - y_min
+
+                if y_range <= self._bar_still_range_px:
+                    self.bar_y_ref = float(np.median(self._bar_ref_candidates))
+                    self._bar_ref_locked = True
+
+
         # --- Absolute bar height above floor (cm) ---
         bar_height_abs_cm = None
 
@@ -500,7 +510,7 @@ class SquatAnalysisApp:
             if self.bar_y_ref is not None:
                 bar_height_px = bar_y_px - self.bar_y_ref
 
-            # absolute height using FLOOR marker (ID = 44)
+            # absolute height using FLOOR marker
             mm_per_px = self.tracker.mm_per_px
             if (mm_per_px is not None) and (self.MARKER_FLOOR_ID in centers):
                 self._floor_marker_seen = True
@@ -514,8 +524,6 @@ class SquatAnalysisApp:
 
                 # Bar-Höhe über Boden (cm)
                 bar_height_abs_cm = (floor_ground_y_px - bar_y_px) * mm_per_px / 10.0
-
-
 
         self.bar_height_px = bar_height_px
         return femur_angle, knee_valid, depth_angle, bar_height_px, bar_height_abs_cm
