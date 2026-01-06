@@ -1,6 +1,6 @@
 from __future__ import annotations # für Python 3.7 Kompatibilität
 from dataclasses import dataclass # Typing für Konfiguration
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional # für Typ-Hinweise
 
 import cv2 # OpenCV für ArUco
 import numpy as np # NumPy für numerische Operationen
@@ -8,23 +8,23 @@ import numpy as np # NumPy für numerische Operationen
 # Markergröße in mm
 MARKER_SIZE_MM = 90.0
 
-@dataclass #automatische Initialisierung von Klasse (sammelt Konfigurationsparameter)
+@dataclass(slots=True) #automatische Initialisierung von Klassen (sammelt Konfigurationsparameter, sonst langes __init__)
 # Konfigurationsklasse für ArucoTracker
-class ArucoTrackerConfig:
+class ArucoTrackerConfig: # Daten"container" für Konfigurationsparameter
     dictionary: int = cv2.aruco.DICT_6X6_250
-    use_corner_refine_subpix: bool = True
+    use_corner_refine_subpix: bool = True #stabile Eckenerkennung
 
     # Toleranzlogik
-    update_interval_ms: int = 40   # entspricht deinem GUI-Tick
-    max_gap_seconds: float = 1.0   # gewünschte Toleranz (1 s)
+    update_interval_ms: int = 20   # wie Tkinter-Gui-Loop -> 25 FPS
+    max_gap_seconds: float = 0.5   # definierte Toleranz, dass Marker kurz fehlen dürfen -> 0.5 s
 
     # DetectorParameters (Einstellungen für die Marker-Erkennung)
-    adaptiveThreshWinSizeMin: int = 3
-    adaptiveThreshWinSizeMax: int = 23
-    adaptiveThreshWinSizeStep: int = 10
-    adaptiveThreshConstant: int = 7
+    adaptiveThreshWinSizeMin: int = 3 # kleinste Fenstergröße von 3x3 Pixeln -> sehr lokale Betrachtung, Marker weit weg, ansonsten würden Marker nicht erkannt werden
+    adaptiveThreshWinSizeMax: int = 23 # größte Fenstergröße von 23x23 Pixeln -> große Fenster für nahe Marker und schlechte Lichtverhältnisse
+    adaptiveThreshWinSizeStep: int = 10 # OpenCV testet Fenstergrößen in Schritten von 10 Pixeln zwischen min und max -> 3,13,23 -> gute Abdeckung, wenig Rechenaufwand
+    adaptiveThreshConstant: int = 7 # Konstante, die von Mittelwert subtrahiert wird -> nur Pixel dunkler als Mittelwert-7 werden als Marker-Pixel betrachtet -> so klare geschlossene Kanten
 
-    minMarkerPerimeterRate: float = 0.02
+    minMarkerPerimeterRate: float = 0.02 # Mindestumfang, den Marker haben muss, um erkannt zu werden (im Verhältnis zur Bildgröße = 80px)
     maxMarkerPerimeterRate: float = 4.0
     minCornerDistanceRate: float = 0.02
 
