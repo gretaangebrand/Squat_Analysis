@@ -1,4 +1,4 @@
-from squat_app import SquatAnalysisApp
+from app import SquatAnalysisApp
 
 # Start von der Squat-Analyse-Anwendung
 if __name__ == "__main__":
