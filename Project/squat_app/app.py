@@ -484,27 +484,25 @@ class SquatAnalysisApp:
         bar_height_px = None
         bar_y_px = None
 
-        # --- set bar reference (lock when still) ---
-        if (not self._bar_ref_locked) and (bar_y_px is not None):
-            self._bar_ref_candidates.append(bar_y_px)
-
-            if len(self._bar_ref_candidates) >= self._bar_ref_min_samples:
-                y_min = min(self._bar_ref_candidates)
-                y_max = max(self._bar_ref_candidates)
-                y_range = y_max - y_min
-
-                if y_range <= self._bar_still_range_px:
-                    self.bar_y_ref = float(np.median(self._bar_ref_candidates))
-                    self._bar_ref_locked = True
-
-
         # --- Absolute bar height above floor (cm) ---
         bar_height_abs_cm = None
-
         MARKER_SIZE_MM = 90.0  # Boden-ArUco ist 90x90 mm
 
         if self.MARKER_BAR_ID in centers:
             bar_y_px = float(centers[self.MARKER_BAR_ID][1])
+
+            # --- set bar reference (lock when still) ---
+            if not self._bar_ref_locked:
+                self._bar_ref_candidates.append(bar_y_px)
+
+                if len(self._bar_ref_candidates) >= self._bar_ref_min_samples:
+                    y_min = min(self._bar_ref_candidates)
+                    y_max = max(self._bar_ref_candidates)
+                    y_range = y_max - y_min
+
+                    if y_range <= self._bar_still_range_px:
+                        self.bar_y_ref = float(np.median(self._bar_ref_candidates))
+                        self._bar_ref_locked = True
 
             # relative displacement (für movement / standphase)
             if self.bar_y_ref is not None:
@@ -516,14 +514,11 @@ class SquatAnalysisApp:
                 self._floor_marker_seen = True
                 floor_center_y_px = float(centers[self.MARKER_FLOOR_ID][1])
 
-                # Marker-Höhe in Pixel
                 marker_size_px = MARKER_SIZE_MM / mm_per_px
-
-                # Unterkante des Bodenmarkers (Marker steht vertikal!)
                 floor_ground_y_px = floor_center_y_px + 0.5 * marker_size_px
 
-                # Bar-Höhe über Boden (cm)
                 bar_height_abs_cm = (floor_ground_y_px - bar_y_px) * mm_per_px / 10.0
+
 
         self.bar_height_px = bar_height_px
         return femur_angle, knee_valid, depth_angle, bar_height_px, bar_height_abs_cm
