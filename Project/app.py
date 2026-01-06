@@ -162,9 +162,20 @@ class SquatAnalysisApp:
 
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 
         self.update_interval = 40  # ms ≈ 25 fps GUI loop
         print(f"GUI update interval (ms): {self.update_interval}")
+        # --- Performance throttles ---
+        self._frame_i = 0
+
+        # Plot nur alle n Frames aktualisieren (z.B. 2 oder 3)
+        self.plot_every_n = 2   # 25fps tracking, ~12.5fps plot
+
+        # OpenCV imshow nur alle n Frames (optional)
+        self.imshow_every_n = 2  # ~12.5fps Anzeige, reduziert UI-Last
+
 
         # -------------------------
         # ArUco Tracker (ausgelagert)
@@ -344,7 +355,7 @@ class SquatAnalysisApp:
                 self._cooldown_frames -= 1
 
             # Kombinierte Stabilisierung (Depth + Knee_valid)
-            cls, ok_stable, high_stable = self.update_validity_stability(squat_depth_angle, knee_valid)
+            #cls, ok_stable, high_stable = self.update_validity_stability(squat_depth_angle, knee_valid)
 
             # Anzeige
             if cls is None:
@@ -398,8 +409,11 @@ class SquatAnalysisApp:
 
 
 
-            # --- Live Plots updaten ---
-            self.update_live_plots()
+            # --- Live Plots updaten (throttled) ---
+            self._frame_i += 1
+            if (self._frame_i % self.plot_every_n) == 0:
+                self.update_live_plots()
+
 
             if (self.MARKER_BAR_ID in self.last_centers) and (bar_height_px is not None):
                 bar = self.last_centers[self.MARKER_BAR_ID]
@@ -445,9 +459,14 @@ class SquatAnalysisApp:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
             # Frame anzeigen
-            cv2.imshow("Squat Camera", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                self.stop_measurement()
+            if (self._frame_i % self.imshow_every_n) == 0:
+                cv2.imshow("Squat Camera", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    self.stop_measurement()
+            else:
+                # trotzdem Events pumpen, minimal
+                cv2.waitKey(1)
+
 
             self.window.after(self.update_interval, self.update_loop)
 
