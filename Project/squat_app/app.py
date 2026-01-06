@@ -12,7 +12,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from aruco_tracker import ArucoTracker, ArucoTrackerConfig
 from angles import femur_segment_angle_deg, squat_depth_angle_deg, knee_angle_deg, knee_valid_angle_deg
-from squat_app.sound import play_valid_squat_sound as _play_valid_squat_sound
+from sound import play_valid_squat_sound as _play_valid_squat_sound
 from angles import femur_angle_depth_signed_deg
 # =========================
 # Plot configuration
