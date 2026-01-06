@@ -1,42 +1,10 @@
 # kinematics/angles.py
 from __future__ import annotations # for forward references
 from typing import Dict, Optional # for type hints
-
 import numpy as np # for numerical operations
 
 # Anatomische Winkelberechnungen basierend auf ArUco-Marker-Zentren 
 # und relativ zur Horizontalen Bild-x-Achse
-def femur_segment_angle_deg(
-    centers: Dict[int, np.ndarray],
-    hip_id: int,
-    knee_id: int,
-) -> Optional[float]:
-    """
-    Anatomischer Femur-Segmentwinkel relativ zur Horizontalen (Bild-x-Achse).
-    0°  -> Femur horizontal
-    +90°/-90° -> Femur vertikal
-
-    Bildkoordinaten haben y nach unten. Für "mathematischen" Winkel wird dy invertiert.
-    """
-    # Prüfe ob beide Marker vorhanden sind
-    if hip_id not in centers or knee_id not in centers:
-        return None
-
-    # Extrahiere Marker-Zentren
-    hip = centers[hip_id]
-    knee = centers[knee_id]
-
-    # Vektor vom Hüft- zum Knie-Marker
-    vec = knee - hip
-    # Berechne Winkel mit arctan2
-    dx = float(vec[0])
-    # Invertiere dy für mathematischen Winkel
-    dy = float(-vec[1])  # invertiere Bild-y
-
-    # Berechne Winkel in Radiant und konvertiere zu Grad
-    angle_rad = np.arctan2(dy, dx)
-    return float(np.degrees(angle_rad))
-
 def femur_angle_depth_signed_deg(
 centers: Dict[int, np.ndarray],
     hip_id: int,
@@ -46,10 +14,8 @@ centers: Dict[int, np.ndarray],
     Femur angle relative to horizontal (0..90°) with a depth-based sign:
     - magnitude: 0° = femur horizontal, 90° = femur vertical
     - sign: + if hip is ABOVE knee, - if hip is BELOW knee
-      (negative angles occur only when hip_y > knee_y in image coordinates)
-
-    This avoids confusing sign flips due to vector orientation.
     """
+    # Check, ob beide Marker vorhanden sind, sonst keine sinnvolle Berechnung möglich
     if hip_id not in centers or knee_id not in centers:
         return None
 

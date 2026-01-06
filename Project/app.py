@@ -2,7 +2,6 @@ import cv2
 import tkinter as tk
 from tkinter import ttk
 from collections import deque
-import winsound
 import numpy as np
 
 import matplotlib
@@ -11,9 +10,8 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from aruco_tracker import ArucoTracker, ArucoTrackerConfig
-from angles import femur_segment_angle_deg, squat_depth_angle_deg, knee_angle_deg, knee_valid_angle_deg
+from angles import squat_depth_angle_deg, knee_valid_angle_deg, femur_angle_depth_signed_deg
 from sound import play_valid_squat_sound as _play_valid_squat_sound
-from angles import femur_angle_depth_signed_deg
 # =========================
 # Plot configuration
 # =========================

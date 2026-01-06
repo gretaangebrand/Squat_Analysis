@@ -25,8 +25,8 @@ class ArucoTrackerConfig: # Daten"container" für Konfigurationsparameter
     adaptiveThreshConstant: int = 7 # Konstante, die von Mittelwert subtrahiert wird -> nur Pixel dunkler als Mittelwert-7 werden als Marker-Pixel betrachtet -> so klare geschlossene Kanten
 
     minMarkerPerimeterRate: float = 0.02 # Mindestumfang, den Marker haben muss, um erkannt zu werden (im Verhältnis zur Bildgröße = 80px)
-    maxMarkerPerimeterRate: float = 4.0
-    minCornerDistanceRate: float = 0.02
+    maxMarkerPerimeterRate: float = 4.0 # Höchstumfang, den Marker haben darf, um erkannt zu werden (im Verhältnis zur Bildgröße = 16000px)
+    minCornerDistanceRate: float = 0.02 # Mindestabstand zwischen Ecken (im Verhältnis zur Bilddiagonale = 28.28px), dass keine Ecken doppelt erkannt werden/zu nahe beieinander liegen
 
 # ArucoTracker-Klasse
 class ArucoTracker:
@@ -34,7 +34,7 @@ class ArucoTracker:
     Verantwortlich für:
     - detectMarkers()
     - Mittelpunkte berechnen
-    - 1s Toleranz: Marker dürfen kurz fehlen; danach werden sie verworfen
+    - 0.5s Toleranz: Marker dürfen kurz fehlen; danach werden sie verworfen
     """
     # Initialisierung
     def __init__(self, config: Optional[ArucoTrackerConfig] = None):
@@ -42,6 +42,7 @@ class ArucoTracker:
         self.cfg = config or ArucoTrackerConfig()
         # ArUco-Detector initialisieren
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(self.cfg.dictionary)
+        
         # Detector-Parameter setzen
         params = cv2.aruco.DetectorParameters()
         params.adaptiveThreshWinSizeMin = self.cfg.adaptiveThreshWinSizeMin
@@ -49,13 +50,14 @@ class ArucoTracker:
         params.adaptiveThreshWinSizeStep = self.cfg.adaptiveThreshWinSizeStep
         params.adaptiveThreshConstant = self.cfg.adaptiveThreshConstant
  
+        # Umfangsrate für Marker-Erkennung definieren
         params.minMarkerPerimeterRate = self.cfg.minMarkerPerimeterRate
         params.maxMarkerPerimeterRate = self.cfg.maxMarkerPerimeterRate
         params.minCornerDistanceRate = self.cfg.minCornerDistanceRate
 
         # Kalibrierungsdaten, die Skala in mm/px liefern
         self.mm_per_px = None
-        self._mm_per_px_ema = None  # geglättet
+        self._mm_per_px_ema = None 
 
         # Ecken verfeinern
         if self.cfg.use_corner_refine_subpix:
@@ -69,9 +71,7 @@ class ArucoTracker:
         self.last_seen_frame: Dict[int, int] = {}
 
         # Aus update_interval_ms & max_gap_seconds Frames ableiten
-        self.max_gap_frames: int = max(
-            1, int(round(self.cfg.max_gap_seconds * 1000.0 / self.cfg.update_interval_ms))
-        )
+        self.max_gap_frames: int = max(1, int(round(self.cfg.max_gap_seconds * 1000.0 / self.cfg.update_interval_ms)))
 
     # setzt den Tracker-State zurück, wenn Messung neu startet
     def reset(self) -> None:
@@ -129,9 +129,7 @@ class ArucoTracker:
             last_frame = self.last_seen_frame.get(mid, -10**9)
             if (self.frame_counter - last_frame) <= self.max_gap_frames:
                 centers_out[mid] = center
-
         return centers_out
-
 
     # Abschätzung mm/px aus sichtbaren Markern
     def _estimate_mm_per_px_from_corners(self, marker_corners_px, marker_size_mm=MARKER_SIZE_MM):
