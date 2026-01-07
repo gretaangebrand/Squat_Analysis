@@ -11,9 +11,9 @@ centers: Dict[int, np.ndarray],
     knee_id: int,
 ) -> Optional[float]:
     """
-    Femur angle relative to horizontal (0..90°) with a depth-based sign:
-    - magnitude: 0° = femur horizontal, 90° = femur vertical
-    - sign: + if hip is ABOVE knee, - if hip is BELOW knee
+    Femur winkel relativ zur Horizontalen (0..90°) mit einem tiefenbasierten Vorzeichen:
+    - Betrag/Magnitude: 0° = Femur horizontal, 90° = Femur vertikal
+    - Vorzeichen: + wenn Hüfte ÜBER Knie, - wenn Hüfte UNTER Knie
     """
     # Check, ob beide Marker vorhanden sind, sonst keine sinnvolle Berechnung möglich
     if hip_id not in centers or knee_id not in centers:
@@ -75,7 +75,7 @@ def squat_depth_angle_deg(
     # Vertikaler Abstand dy von Hüfte zu Knie
     dy = float(knee[1] - hip[1])  # Bild-y: nach unten positiv
 
-    # vertikalen Abstand durch Femurlänge normieren --> Größenunabhängigkeit
+    # vertikalen Abstand von Hüfe zu Knie durch Femurlänge normieren -> Größenunabhängigkeit
     # und Messwert begrenzen auf [-1, 1] für arcsin
     ratio = np.clip(dy / femur_len, -1.0, 1.0)
 
