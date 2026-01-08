@@ -437,6 +437,19 @@ class SquatAnalysisApp:
 
     def show_camera_selection_popup(self):
         popup = tk.Toplevel(self.window)
+        info_text = (
+            "Before you start:\n"
+            "• Place the laptop or camera at approximately knee height and make sure your full body is visible.\n"
+            "• For best ArUco tracking, wear plain, single-color clothing with good contrast.\n\n"
+            "How to begin:\n"
+            "• Select the camera you want to use for the analysis (you can also switch cameras later in the program).\n"
+            "• Click Connect, start the measurement, and perform your squats. 😊")
+        ttk.Label(
+            popup,
+            text=info_text,
+            justify="left", font=("Arial", 12),
+            wraplength=520).pack(padx=12, pady=(0, 10), anchor="w")
+
         popup.title("Select camera")
         popup.resizable(False, False)
 
@@ -445,7 +458,7 @@ class SquatAnalysisApp:
         popup.grab_set()
 
         # Inhalt
-        ttk.Label(popup, text="Please select the camera for squat analysis:", font=("Arial", 12)).pack(
+        ttk.Label(popup, text="Select the prefered camera for squat analysis:", font=("Arial", 12)).pack(
             padx=12, pady=(12, 8)
         )
 
