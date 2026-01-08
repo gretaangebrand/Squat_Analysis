@@ -3,6 +3,8 @@ import tkinter as tk
 from tkinter import ttk
 from collections import deque
 import numpy as np
+import time  # für tic toc Profiling
+from pygrabber.dshow_graph import FilterGraph
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -41,7 +43,7 @@ class SquatAnalysisApp:
     MARKER_FLOOR_ID = 39 # Bodenmarker ID 
 
 
-    def __init__(self, camera_index: int = 1):
+    def __init__(self):
         # -------------------------
         # GUI Setup
         # -------------------------
@@ -66,6 +68,7 @@ class SquatAnalysisApp:
         self.knee_valid_angle_var = tk.StringVar(value="Knee angle: -- °")
         self.squat_status_var = tk.StringVar(value="Squat: --")
         self.tracking_status_var = tk.StringVar(value="Tracking: --")
+        self.active_camera_var = tk.StringVar(value="Camera: --")
         self._floor_marker_seen = False
 
         # Handle / Bar height tracking
@@ -107,6 +110,8 @@ class SquatAnalysisApp:
         ttk.Label(self.left_panel, textvariable=self.bar_height_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.squat_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.tracking_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.left_panel,textvariable=self.active_camera_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+
 
 
         # Knee-valid thresholds (signierter Winkel)
@@ -122,10 +127,9 @@ class SquatAnalysisApp:
         self._squat_state = "TOP"          # TOP / BOTTOM
         self._bottom_was_valid = False
 
-        # optional: Cooldown nach Count, verhindert Doppelt-Zählen bei wackeliger TOP-Phase
+        # Cooldown nach Count, verhindert Doppelt-Zählen bei wackeliger TOP-Phase
         self._cooldown_frames = 0
         self.cooldown_after_rep = 10       # ~0.4s bei 25fps
-
 
         # -------------------------
         # Squat Counter / State Machine (Live Tab)
@@ -138,7 +142,6 @@ class SquatAnalysisApp:
         self.sound_enabled_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.left_panel,text="Sound on valid squat",variable=self.sound_enabled_var).pack(anchor="w", pady=(0, 6))
 
-
         # Hysterese
         self.depth_ok_threshold = -2.0
         self.depth_high_threshold = 2.0
@@ -149,34 +152,72 @@ class SquatAnalysisApp:
         self._high_streak = 0
         self._squat_state = "TOP"
 
+        # --- Camera selection UI (before start) ---
+        self.cameras = self.get_cameras_for_ui()
+
+        values = [f"{idx} - {name}" for idx, name in self.cameras]
+        default_val = values[0] if values else ""
+
+        self.camera_var = tk.StringVar(value=default_val)
+
+        cam_frame = ttk.LabelFrame(self.window, text="Camera setup")
+        cam_frame.pack(fill="x", pady=(0, 10))
+
+        ttk.Label(cam_frame, text="Camera:").pack(side="left", padx=(8, 4))
+
+        self.camera_combo = ttk.Combobox(
+            cam_frame,
+            textvariable=self.camera_var,
+            values=values,
+            width=45,
+            state="readonly"
+        )
+        self.camera_combo.pack(side="left", padx=4)
+
+        def _refresh_camera_dropdown(self):
+            self.cameras = self.get_cameras_for_ui()
+            values = [f"{idx} - {name}" for idx, name in self.cameras]
+            self.camera_combo["values"] = values
+
+            if values:
+                # wenn aktuell ausgewählter Wert nicht mehr existiert → auf erstes setzen
+                cur = self.camera_var.get().strip()
+                if cur not in values:
+                    self.camera_var.set(values[0])
+            else:
+                self.camera_var.set("")
+
+
+        self.start_btn = ttk.Button(cam_frame, text="Connect Camera", command=self.start_program)
+        self.start_btn.pack(side="left", padx=6)
+
+
         # -------------------------
         # Kamera Setup
         # -------------------------
-        self.cap = cv2.VideoCapture(camera_index)
-        if not self.cap.isOpened():
-            print("❌ Cannot open camera")
-        else:
-            print("Camera opened successfully")
+        self.cap = None  # wird in start_program initialisiert
+        self.camera_started = False
 
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-
+        # Update interval für GUI loop
         self.update_interval = 40  # ms ≈ 25 fps GUI loop
         print(f"GUI update interval (ms): {self.update_interval}")
+        
         # --- Performance throttles ---
         self._frame_i = 0
+        # --- simple tic/toc profiling ---
+        self._prof_enabled = True          # auf False setzen zum Abschalten
+        self._prof_print_every = 25        # alle N Frames Ausgabe (25 ~ 1 Sekunde bei ~25fps)
+        self._prof = {}                    # sammelt Zeiten pro Block (ms)
 
-        # Plot nur alle n Frames aktualisieren (z.B. 2 oder 3)
+
+        # Plot nur alle n Frames aktualisieren
         self.plot_every_n = 2   # 25fps tracking, ~12.5fps plot
 
         # OpenCV imshow nur alle n Frames (optional)
-        self.imshow_every_n = 2  # ~12.5fps Anzeige, reduziert UI-Last
-
+        self.imshow_every_n = 4  # ungefähr 6.25fps Anzeige, reduziert UI-Last
 
         # -------------------------
-        # ArUco Tracker (ausgelagert)
+        # ArUco Tracker
         # -------------------------
         tracker_cfg = ArucoTrackerConfig(
             dictionary=cv2.aruco.DICT_6X6_250,
@@ -224,8 +265,6 @@ class SquatAnalysisApp:
         self.canvas.draw()
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
-
-
         # -------------------------
         # Histogram Figure (Tab) (wird beim Stop befüllt)
         # -------------------------
@@ -248,14 +287,41 @@ class SquatAnalysisApp:
         # Vorwert für Bewegungsdetektion
         self._prev_bar_height_px = None
 
-
         # sauberes Beenden
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # tic toc Profiling
+    def _tic(self, key: str):
+        if not getattr(self, "_prof_enabled", False):
+            return None
+        return time.perf_counter()
+
+    def _toc(self, key: str, t0):
+        if t0 is None:
+            return
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        self._prof[key] = self._prof.get(key, 0.0) + dt_ms
+
+    def _prof_flush_if_needed(self):
+        if not getattr(self, "_prof_enabled", False):
+            return
+        if (self._frame_i % self._prof_print_every) != 0:
+            return
+        if not self._prof:
+            return
+        parts = [f"{k}={v/self._prof_print_every:.1f}ms" for k, v in sorted(self._prof.items())]
+        print("PERF(avg): " + " | ".join(parts))
+        self._prof.clear()
 
     # ------------------------------------------------------------------
     # GUI Steuerung
     # ------------------------------------------------------------------
     def start_measurement(self):
+        if not self.camera_started or self.cap is None:
+            print("❌ Please select a camera first and click Start.")
+            self.tracking_status_var.set("Tracking: ❗ select camera + Start first")
+            return
+        
         if not self.is_measuring:
             self.tracker.reset()
 
@@ -289,6 +355,7 @@ class SquatAnalysisApp:
 
     def stop_measurement(self):
         self.is_measuring = False
+        self.active_camera_var.set("Camera: --")
         print("Measurement stopped")
 
         # render histograms and switch tab
@@ -306,21 +373,165 @@ class SquatAnalysisApp:
     def run(self):
         self.window.mainloop()
 
+    def list_available_cameras(self, max_index: int = 5) -> list[int]:
+        available = []
+        for i in range(max_index + 1):
+            cap = self._open_camera_by_index(i)
+            if cap is not None:
+                available.append(i)
+                cap.release()
+        return available
+
+
+    
+    def get_camera_names_windows(self) -> list[str]:
+        try:
+            graph = FilterGraph()
+            return graph.get_input_devices()
+        except Exception:
+            return []
+
+    def get_cameras_for_ui(self):
+        names = self.get_camera_names_windows()
+        max_index = max(3, len(names) + 2)
+
+        indices = self.list_available_cameras(max_index=max_index)  # deine open/read Prüfung
+        cams = []
+        for idx in indices:
+            name = names[idx] if idx < len(names) else "Camera"
+            cams.append((idx, name))
+        return cams
+
+
+    def start_program(self):
+        sel = self.camera_var.get().strip()
+        if not sel:
+            print("❌ No camera selected.")
+            self.camera_started = False
+            self.tracking_status_var.set("Tracking: ❌ no camera selected")
+            return
+        
+        self.camera_started = True
+        self.tracking_status_var.set(f"Tracking: camera {sel} ready ✅")
+        self.active_camera_var.set(f"Camera: {sel}")
+        print(f"✅ Camera opened: {sel}")
+
+        # falls Messung läuft: sauber stoppen
+        if self.is_measuring:
+            self.stop_measurement()
+
+        # OpenCV-Fenster schließen (wichtig beim Wechsel)
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+        # alte Kamera freigeben
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        # kurze Pause, damit Windows den Device-Handle freigibt
+        import time
+        time.sleep(0.2)
+
+        # Kameraindex aus UI
+        sel = self.camera_var.get().strip()
+        if not sel:
+            print("❌ No camera selected.")
+            self.camera_started = False
+            self.tracking_status_var.set("Tracking: ❌ no camera selected")
+            return
+
+        cam_index = int(sel.split(" - ")[0])
+
+
+        # Falls schon offen -> sauber schließen
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        # Backend (Windows: DSHOW bewährt). Wenn du nicht Windows nutzt: einfach cv2.VideoCapture(cam_index)
+        cap = self._open_camera_by_index(cam_index)
+        if cap is None:
+            print(f"❌ Cannot open camera index {cam_index}")
+            self.cap = None
+            self.camera_started = False
+            self.tracking_status_var.set("Tracking: ❌ camera not opened")
+            return
+        self.cap = cap
+
+        if not self.cap.isOpened():
+            print(f"❌ Cannot open camera index {cam_index}")
+            self.cap = None
+            self.camera_started = False
+            self.tracking_status_var.set("Tracking: ❌ camera not opened")
+            return
+
+        # Low-latency / Performance settings (best effort)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        
+
+        if not self.cap.isOpened():
+            print(f"❌ Cannot open camera index {cam_index}")
+            self.camera_started = False
+            self.tracking_status_var.set("Tracking: ❌ camera not opened")
+            return
+
+        self.camera_started = True
+        self.tracking_status_var.set(f"Tracking: camera {cam_index} ready ✅")
+        print(f"✅ Camera {cam_index} opened successfully")
+
+    def _open_camera_by_index(self, index: int):
+        """Try to open camera index with multiple backends. Return opened cap or None."""
+        for backend in (cv2.CAP_MSMF, 0):  # MSMF first, then default
+            cap = cv2.VideoCapture(index, backend) if backend != 0 else cv2.VideoCapture(index)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    return cap
+            cap.release()
+        return None
+
+
+
+
     # ------------------------------------------------------------------
     # Main Loop
     # ------------------------------------------------------------------
     def update_loop(self):
+        # Kamera prüfen
+        if self.cap is None or (not self.cap.isOpened()):
+            self.tracking_status_var.set("Tracking: ❌ camera not available")
+            self.stop_measurement()
+            return
+
         if not self.is_measuring:
             return
 
         try:
+            # Profiling reset
+            t0 = self._tic("cap.read")
             ret, frame = self.cap.read()
+            self._toc("cap.read", t0)
+
             if not ret:
                 print("Failed to grab frame")
                 self.window.after(100, self.update_loop)
                 return
 
+            t0 = self._tic("process_frame")
             femur_angle, knee_valid, squat_depth_angle, bar_height_px, bar_height_abs_cm = self.process_frame(frame)
+            self._toc("process_frame", t0)
 
 
             # Tracking Status
@@ -337,16 +548,16 @@ class SquatAnalysisApp:
                 self.bar_height_var.set("Bar height: -- cm")
 
 
-
-
             # --- Stabilisierung + Statusanzeige + Counter ---
             cls, ok_stable, high_stable = self.update_validity_stability(squat_depth_angle, knee_valid)
 
             # Tracking status text (für Overlay)
             tracking_text = self.tracking_status_var.get() if hasattr(self, "tracking_status_var") else None
 
+            t0 = self._tic("cv_draw")
             # Live-Farbfeedback ins Kamerabild
             self.draw_live_feedback(frame, cls, tracking_text=tracking_text)
+            self._toc("cv_draw", t0)
 
             # Cooldown runterzählen
             if self._cooldown_frames > 0:
@@ -394,7 +605,6 @@ class SquatAnalysisApp:
                         self._bottom_was_valid = False
                         self._cooldown_frames = self.cooldown_after_rep
 
-
             # --- Buffers updaten ---
             self.knee_angle_buffer.append(knee_valid if knee_valid is not None else float("nan"))
 
@@ -404,14 +614,12 @@ class SquatAnalysisApp:
             else:
                 self.bar_height_buffer.append(float("nan"))
 
-
-
-
             # --- Live Plots updaten (throttled) ---
             self._frame_i += 1
             if (self._frame_i % self.plot_every_n) == 0:
+                t0 = self._tic("plot")
                 self.update_live_plots()
-
+                self._toc("plot", t0)
 
             if (self.MARKER_BAR_ID in self.last_centers) and (bar_height_px is not None):
                 bar = self.last_centers[self.MARKER_BAR_ID]
@@ -435,28 +643,29 @@ class SquatAnalysisApp:
                             self.bar_path_x.append(bar_x_cm)
                             self.bar_path_y.append(bar_height_abs_cm)
 
-
                 else:
                     # Keine Kalibrierung -> nichts sammeln (sonst px als cm gelabelt)
                     self._prev_bar_height_px = bar_height_px
 
-
-
-
-
-            # Boden-Referenzlinie (optional)
+            # Boden-Referenzlinie
             h, w, _ = frame.shape
             y_floor = int(h * 0.8)
+            t0 = self._tic("cv_draw")
             cv2.line(frame, (0, y_floor), (w, y_floor), (0, 255, 0), 2)
 
+            t0 = self._tic("cv_draw")
             # Segmente + Bar Marker zeichnen
             self.draw_segments(frame)
+            self._toc("cv_draw", t0)
 
+            t0 = self._tic("cv_draw")
             # Overlay Status-Text
             cv2.putText(frame, f"State: {self._squat_state}", (10, 65),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+            self._toc("cv_draw", t0)
 
             # Frame anzeigen
+            t0 = self._tic("imshow")
             if (self._frame_i % self.imshow_every_n) == 0:
                 cv2.imshow("Squat Camera", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -464,8 +673,10 @@ class SquatAnalysisApp:
             else:
                 # trotzdem Events pumpen, minimal
                 cv2.waitKey(1)
+            self._toc("imshow", t0)
 
-
+            # Profiling Ausgabe wenn gewünscht
+            self._prof_flush_if_needed()
             self.window.after(self.update_interval, self.update_loop)
 
         except Exception as e:
@@ -481,7 +692,9 @@ class SquatAnalysisApp:
         centers = dict(self.last_centers) if self.last_centers else {}
 
         try:
+            t0 = self._tic("aruco.update")
             detected = self.tracker.update(frame, draw=True)
+            self._toc("aruco.update", t0)
             # Merge: neue Detektionen überschreiben alte, aber fehlende bleiben kurz erhalten
             if detected is not None and len(detected) > 0:
                 centers.update(detected)
@@ -491,11 +704,11 @@ class SquatAnalysisApp:
 
         self.last_centers = centers
 
-
-
+        t0 = self._tic("angles")
         femur_angle = femur_angle_depth_signed_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         depth_angle = squat_depth_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
         knee_valid = knee_valid_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID, self.MARKER_ANKLE_ID, reference_deg=90.0)
+        self._toc("angles", t0)
 
         # --- Bar depth (relative, px) ---
         bar_height_px = None
@@ -536,10 +749,8 @@ class SquatAnalysisApp:
 
                 bar_height_abs_cm = (floor_ground_y_px - bar_y_px) * mm_per_px / 10.0
 
-
         self.bar_height_px = bar_height_px
         return femur_angle, knee_valid, depth_angle, bar_height_px, bar_height_abs_cm
-
 
     # ------------------------------------------------------------------
     # Live plot update
@@ -623,8 +834,6 @@ class SquatAnalysisApp:
             cls = "TRANSITION"
 
         return cls, ok_stable, high_stable
-
-
 
     # ------------------------------------------------------------------
     # Tracking status
@@ -772,8 +981,6 @@ class SquatAnalysisApp:
         # Optional: Rahmen ums ganze Bild (starker visueller Hinweis)
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, 6)
 
-
-
     # ------------------------------------------------------------------
     # Histogram rendering (called on stop)
     # ------------------------------------------------------------------
@@ -856,8 +1063,6 @@ class SquatAnalysisApp:
         self.hist_canvas = FigureCanvasTkAgg(self.hist_fig, master=self.tab_hist)
         self.hist_canvas.draw()
         self.hist_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=10)
-
-
 
     # ------------------------------------------------------------------
     # Sound
