@@ -174,20 +174,6 @@ class SquatAnalysisApp:
         )
         self.camera_combo.pack(side="left", padx=4)
 
-        def _refresh_camera_dropdown(self):
-            self.cameras = self.get_cameras_for_ui()
-            values = [f"{idx} - {name}" for idx, name in self.cameras]
-            self.camera_combo["values"] = values
-
-            if values:
-                # wenn aktuell ausgewählter Wert nicht mehr existiert → auf erstes setzen
-                cur = self.camera_var.get().strip()
-                if cur not in values:
-                    self.camera_var.set(values[0])
-            else:
-                self.camera_var.set("")
-
-
         self.start_btn = ttk.Button(cam_frame, text="Connect Camera", command=self.start_program)
         self.start_btn.pack(side="left", padx=6)
 
@@ -302,16 +288,17 @@ class SquatAnalysisApp:
         dt_ms = (time.perf_counter() - t0) * 1000.0
         self._prof[key] = self._prof.get(key, 0.0) + dt_ms
 
-    def _prof_flush_if_needed(self):
-        if not getattr(self, "_prof_enabled", False):
+    # Profiling Ausgabe alle N Frames
+    #def _prof_flush_if_needed(self):
+        #if not getattr(self, "_prof_enabled", False):
+            #return
+        #if (self._frame_i % self._prof_print_every) != 0:
             return
-        if (self._frame_i % self._prof_print_every) != 0:
-            return
-        if not self._prof:
-            return
-        parts = [f"{k}={v/self._prof_print_every:.1f}ms" for k, v in sorted(self._prof.items())]
-        print("PERF(avg): " + " | ".join(parts))
-        self._prof.clear()
+        #if not self._prof:
+            #return
+        #parts = [f"{k}={v/self._prof_print_every:.1f}ms" for k, v in sorted(self._prof.items())]
+        #print("PERF(avg): " + " | ".join(parts))
+        #self._prof.clear()
 
     # ------------------------------------------------------------------
     # GUI Steuerung
@@ -402,6 +389,18 @@ class SquatAnalysisApp:
             cams.append((idx, name))
         return cams
 
+    def _refresh_camera_dropdown(self):
+            self.cameras = self.get_cameras_for_ui()
+            values = [f"{idx} - {name}" for idx, name in self.cameras]
+            self.camera_combo["values"] = values
+
+            if values:
+                # wenn aktuell ausgewählter Wert nicht mehr existiert → auf erstes setzen
+                cur = self.camera_var.get().strip()
+                if cur not in values:
+                    self.camera_var.set(values[0])
+            else:
+                self.camera_var.set("")
 
     def start_program(self):
         sel = self.camera_var.get().strip()
@@ -493,7 +492,7 @@ class SquatAnalysisApp:
 
     def _open_camera_by_index(self, index: int):
         """Try to open camera index with multiple backends. Return opened cap or None."""
-        for backend in (cv2.CAP_MSMF, 0):  # MSMF first, then default
+        for backend in (0, cv2.CAP_MSMF):  # MSMF first, then default
             cap = cv2.VideoCapture(index, backend) if backend != 0 else cv2.VideoCapture(index)
             if cap.isOpened():
                 ret, _ = cap.read()
