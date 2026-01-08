@@ -21,7 +21,6 @@ WINDOW_SECONDS = 6
 FPS_ESTIMATE = 25
 MAX_SAMPLES = WINDOW_SECONDS * FPS_ESTIMATE  # 150
 
-
 class SquatAnalysisApp:
     """
     Squat Analysis – Main GUI App
@@ -275,6 +274,9 @@ class SquatAnalysisApp:
 
         # sauberes Beenden
         self.window.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Beim Start Kamera-Auswahl erzwingen (Popup)
+        self.window.after(100, self.show_camera_selection_popup)
+
 
     # tic toc Profiling
     def _tic(self, key: str):
@@ -289,16 +291,16 @@ class SquatAnalysisApp:
         self._prof[key] = self._prof.get(key, 0.0) + dt_ms
 
     # Profiling Ausgabe alle N Frames
-    #def _prof_flush_if_needed(self):
-        #if not getattr(self, "_prof_enabled", False):
-            #return
-        #if (self._frame_i % self._prof_print_every) != 0:
+    def _prof_flush_if_needed(self):
+        if not getattr(self, "_prof_enabled", False):
             return
-        #if not self._prof:
-            #return
-        #parts = [f"{k}={v/self._prof_print_every:.1f}ms" for k, v in sorted(self._prof.items())]
-        #print("PERF(avg): " + " | ".join(parts))
-        #self._prof.clear()
+        if (self._frame_i % self._prof_print_every) != 0:
+            return
+        if not self._prof:
+            return
+        parts = [f"{k}={v/self._prof_print_every:.1f}ms" for k, v in sorted(self._prof.items())]
+        print("PERF(avg): " + " | ".join(parts))
+        self._prof.clear()
 
     # ------------------------------------------------------------------
     # GUI Steuerung
@@ -351,11 +353,42 @@ class SquatAnalysisApp:
 
 
     def on_close(self):
-        self.is_measuring = False
-        if self.cap.isOpened():
-            self.cap.release()
-        cv2.destroyAllWindows()
-        self.window.destroy()
+        # 1) Measurement
+        try:
+            if getattr(self, "is_measuring", False):
+                self.is_measuring = False
+        except Exception:
+            pass
+
+        # 2) OpenCV Fenster schließen
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+
+        # 3) Kamera freigeben (falls vorhanden)
+        try:
+            cap = getattr(self, "cap", None)
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            self.cap = None
+            self.camera_started = False
+        except Exception:
+            pass
+
+        # 4) Tk sauber beenden
+        try:
+            self.window.quit()
+        except Exception:
+            pass
+        try:
+            self.window.destroy()
+        except Exception:
+            pass
+
 
     def run(self):
         self.window.mainloop()
@@ -401,6 +434,74 @@ class SquatAnalysisApp:
                     self.camera_var.set(values[0])
             else:
                 self.camera_var.set("")
+
+    def show_camera_selection_popup(self):
+        popup = tk.Toplevel(self.window)
+        popup.title("Select camera")
+        popup.resizable(False, False)
+
+        # Modal: blockiert Interaktion mit Hauptfenster
+        popup.transient(self.window)
+        popup.grab_set()
+
+        # Inhalt
+        ttk.Label(popup, text="Please select the camera for squat analysis:", font=("Arial", 12)).pack(
+            padx=12, pady=(12, 8)
+        )
+
+        # Dropdown
+        self._refresh_camera_dropdown()
+        values = list(self.camera_combo["values"])
+        if values:
+            self.camera_var.set(values[0])
+        else:
+            self.camera_var.set("")
+
+        combo = ttk.Combobox(
+            popup,
+            textvariable=self.camera_var,
+            values=values,
+            width=45,
+            state="readonly",
+        )
+        combo.pack(padx=12, pady=(0, 10))
+
+        # Status
+        status_var = tk.StringVar(value="")
+        ttk.Label(popup, textvariable=status_var).pack(padx=12, pady=(0, 8))
+
+        # Button row
+        btn_row = ttk.Frame(popup)
+        btn_row.pack(padx=12, pady=(0, 12), fill="x")
+
+        def do_connect():
+            if not self.camera_var.get().strip():
+                status_var.set("No camera found.")
+                return
+
+            self.start_program()  # öffnet Kamera anhand camera_var
+            if getattr(self, "camera_started", False):
+                popup.destroy()
+            else:
+                status_var.set("Could not open selected camera. Please choose another one.")
+
+        def do_exit():
+            # User will nicht wählen -> App schließen
+            popup.destroy()
+            self.on_close()
+
+        ttk.Button(btn_row, text="Connect", command=do_connect).pack(side="left")
+        ttk.Button(btn_row, text="Exit", command=do_exit).pack(side="right")
+
+        # Popup zentrieren (optional, aber nice)
+        self.window.update_idletasks()
+        x = self.window.winfo_rootx() + 60
+        y = self.window.winfo_rooty() + 60
+        popup.geometry(f"+{x}+{y}")
+
+        # WICHTIG: Wenn User auf X am Popup drückt -> App schließen (oder du kannst es blockieren)
+        popup.protocol("WM_DELETE_WINDOW", do_exit)
+
 
     def start_program(self):
         sel = self.camera_var.get().strip()
