@@ -1,7 +1,7 @@
 import cv2
 import tkinter as tk
 from tkinter import ttk
-from collections import deque
+from collections import deque, defaultdict
 import numpy as np
 import time  # für tic toc Profiling
 from pygrabber.dshow_graph import FilterGraph
@@ -15,9 +15,7 @@ from angles import squat_depth_angle_deg, knee_valid_angle_deg, femur_angle_dept
 from sound import play_valid_squat_sound as _play_valid_squat_sound
 
 
-# =========================
 # Plot configuration
-# =========================
 WINDOW_SECONDS = 6
 FPS_ESTIMATE = 25
 MAX_SAMPLES = WINDOW_SECONDS * FPS_ESTIMATE  # 150
@@ -34,27 +32,21 @@ class SquatAnalysisApp:
     - Live Plots (Knee + Bar)
     - Histogram Tab (wird beim Stop befüllt, Standpose herausgefiltert)
     """
-
-    # Marker IDs
-    MARKER_HIP_ID = 42
-    MARKER_KNEE_ID = 41
-    MARKER_ANKLE_ID = 40 
-    MARKER_BAR_ID = 38  # Handle/Bar marker ID
-    MARKER_FLOOR_ID = 39 # Bodenmarker ID 
-
-
+    # Default IDs (wenn keine Kalibrierung)
+    DEFAULT_HIP_ID = 42
+    DEFAULT_KNEE_ID = 41
+    DEFAULT_ANKLE_ID = 40
+    DEFAULT_BAR_ID = 38
+    DEFAULT_FLOOR_ID = 39
+ 
     def __init__(self):
-        # -------------------------
         # GUI Setup
-        # -------------------------
         self.window = tk.Tk()
         self.window.grid_rowconfigure(1, weight=1)
         self.window.grid_columnconfigure(0, weight=1)
         self.window.title("Squat Analysis")
 
-        # -------------------------
         # Tabs (Notebook)
-        # -------------------------
         self.notebook = ttk.Notebook(self.window)
         self.tab_live = ttk.Frame(self.notebook)
         self.tab_hist = ttk.Frame(self.notebook)
@@ -63,9 +55,7 @@ class SquatAnalysisApp:
         self.notebook.add(self.tab_hist, text="Histogram")
         self.notebook.grid(row=1, column=0, sticky="nsew")
 
-        # -------------------------
         # Tk Variables / Labels (Live Tab)
-        # -------------------------
         self.femur_angle_var = tk.StringVar(value="Femur angle: -- °")
         self.knee_valid_angle_var = tk.StringVar(value="Knee angle: -- °")
         self.squat_status_var = tk.StringVar(value="Squat: --")
@@ -82,15 +72,13 @@ class SquatAnalysisApp:
         self.bar_height_px = None
         self.bar_height_var = tk.StringVar(value="Bar height: -- cm")
 
-        # -------------------------
         # Live Tab: 2-column layout (LEFT = variables, RIGHT = plots)
-        # -------------------------
         self.tab_live.grid_rowconfigure(0, weight=1)
         self.tab_live.grid_columnconfigure(0, weight=0)  # left column: compact
         self.tab_live.grid_columnconfigure(1, weight=1)  # right column: expands
 
         self.left_panel = ttk.Frame(self.tab_live, padding=(10, 10))
-        # --- LEFT TOP: control buttons ---
+        # LEFT TOP: control buttons
         self.left_controls = ttk.Frame(self.left_panel)
         self.left_controls.pack(anchor="nw", fill="x", pady=(0, 15))
 
@@ -106,15 +94,13 @@ class SquatAnalysisApp:
         self.right_panel.grid_rowconfigure(0, weight=1)
         self.right_panel.grid_columnconfigure(0, weight=1)
 
-        # --- LEFT: variables + controls ---
+        # LEFT: variables + controls
         ttk.Label(self.left_panel, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.knee_valid_angle_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.bar_height_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.squat_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.tracking_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel,textvariable=self.active_camera_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
-
-
 
         # Knee-valid thresholds (signierter Winkel)
         # Idee: <= 0 bedeutet "mindestens 90° Beugung" erreicht (wie du es willst)
@@ -133,9 +119,7 @@ class SquatAnalysisApp:
         self._cooldown_frames = 0
         self.cooldown_after_rep = 10       # ~0.4s bei 25fps
 
-        # -------------------------
         # Squat Counter / State Machine (Live Tab)
-        # -------------------------
         self.rep_count = 0
         self.rep_count_var = tk.StringVar(value="Valid squats: 0")
         ttk.Label(self.left_panel, textvariable=self.rep_count_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
@@ -156,12 +140,11 @@ class SquatAnalysisApp:
 
         # --- Camera selection UI (before start) ---
         self.cameras = self.get_cameras_for_ui()
-
         values = [f"{idx} - {name}" for idx, name in self.cameras]
         default_val = values[0] if values else ""
-
         self.camera_var = tk.StringVar(value=default_val)
 
+        # Kamera Auswahl Frame
         cam_frame = ttk.LabelFrame(self.window, text="Change Camera")
         cam_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
 
@@ -179,10 +162,7 @@ class SquatAnalysisApp:
         self.start_btn = ttk.Button(cam_frame, text="Connect Camera", command=self.start_program)
         self.start_btn.pack(side="left", padx=6)
 
-
-        # -------------------------
         # Kamera Setup
-        # -------------------------
         self.cap = None  # wird in start_program initialisiert
         self.camera_started = False
         self._preview_cap = None
@@ -207,9 +187,7 @@ class SquatAnalysisApp:
         # OpenCV imshow nur alle n Frames (optional)
         self.imshow_every_n = 4  # ungefähr 6.25fps Anzeige, reduziert UI-Last
 
-        # -------------------------
         # ArUco Tracker
-        # -------------------------
         tracker_cfg = ArucoTrackerConfig(
             dictionary=cv2.aruco.DICT_6X6_250,
             update_interval_ms=self.update_interval,
@@ -218,15 +196,20 @@ class SquatAnalysisApp:
         self.tracker = ArucoTracker(tracker_cfg)
         self.last_centers = {}
 
-        # -------------------------
+        # --- Standing Calibration (auto assign marker roles by y-position) ---
+        self.role_ids = {}                 # nach Kalibrierung gefüllt
+        self.role_mapping_locked = False   # sobald True -> fixe Rollen
+
+        self._calib_y_samples = defaultdict(lambda: deque(maxlen=25))  # y-Werte pro ArUco-ID
+        self._calib_min_samples_per_id = 12                            # Mindestframes pro ID
+        self._calib_max_y_range_px = 6.0                               # "still" Kriterium pro ID
+
+
         # Live Plot Buffers
-        # -------------------------
         self.knee_angle_buffer = deque(maxlen=MAX_SAMPLES)
         self.bar_height_buffer = deque(maxlen=MAX_SAMPLES)
 
-        # -------------------------
         # ---- Live Figure ----
-        # ------------------------
         self.fig = Figure(figsize=(7, 6.5), dpi=100)
 
         self.ax_knee = self.fig.add_subplot(211)
@@ -256,18 +239,13 @@ class SquatAnalysisApp:
         self.canvas.draw()
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
-        # -------------------------
         # Histogram Figure (Tab) (wird beim Stop befüllt)
-        # -------------------------
-        # Histogram plot will be created on Stop
         self.hist_fig = None
         self.hist_canvas = None
         self.ax_hist_depth = None
         self.ax_hist_xy = None
 
-        # -------------------------
         # Bar path storage (Ring-Plot)
-        # -------------------------
         self.bar_path_x = []
         self.bar_path_y = []
 
@@ -394,10 +372,10 @@ class SquatAnalysisApp:
         except Exception:
             pass
 
-
     def run(self):
         self.window.mainloop()
 
+    # Verfügbaren Kameras auflisten
     def list_available_cameras(self, max_index: int = 3) -> list[int]:
         available = []
         for i in range(max_index + 1):
@@ -407,8 +385,69 @@ class SquatAnalysisApp:
                 cap.release()
         return available
 
-
+    # Rollen-ID abfragen (mit Fallback)
+    def _get_role_id(self, role: str, fallback_id: int) -> int:
+        """Return mapped ArUco ID for a given role if calibrated, else fallback."""
+        if self.role_mapping_locked and role in self.role_ids:
+            return self.role_ids[role]
+        return fallback_id
     
+    # Stehende Kalibrierung versuchen
+    def _try_standing_calibration(self, centers: dict) -> None:
+        """
+        Try to assign marker roles based on y-position while standing still.
+        Uses median y across several frames for each detected ID, then sorts top->bottom.
+        """
+        if self.role_mapping_locked:
+            return
+
+        # y-samples sammeln
+        for mid, (x, y) in centers.items():
+            self._calib_y_samples[mid].append(float(y))
+
+        # Kandidaten: genug Samples + wenig Bewegung (range klein)
+        stable = []
+        for mid, ys in self._calib_y_samples.items():
+            if len(ys) < self._calib_min_samples_per_id:
+                continue
+            y_min = min(ys)
+            y_max = max(ys)
+            if (y_max - y_min) <= self._calib_max_y_range_px:
+                y_med = float(np.median(list(ys)))
+                stable.append((y_med, mid))
+
+        # Wir brauchen mind. 5 stabile IDs
+        if len(stable) < 5:
+            return
+
+        # sortieren: kleinster y = oben (BAR), größter y = unten (FLOOR)
+        stable.sort(key=lambda t: t[0])  # nach y_med
+
+        top5 = stable[:5]
+        ids_sorted = [mid for _, mid in top5]
+
+        self.role_ids = {
+            "BAR":   ids_sorted[0],
+            "HIP":   ids_sorted[1],
+            "KNEE":  ids_sorted[2],
+            "ANKLE": ids_sorted[3],
+            "FLOOR": ids_sorted[4],
+        }
+        self.role_mapping_locked = True
+
+        # Bar-Referenz zurücksetzen, weil BAR-ID jetzt dynamisch ist
+        self.bar_y_ref = None
+        self._bar_ref_locked = False
+        self._bar_ref_candidates.clear()
+
+        print(f"✅ Standing calibration locked: {self.role_ids}")
+        self.tracking_status_var.set(
+            f"Tracking: calibrated ✅ (BAR={self.role_ids['BAR']}, HIP={self.role_ids['HIP']}, "
+            f"KNEE={self.role_ids['KNEE']}, ANKLE={self.role_ids['ANKLE']}, FLOOR={self.role_ids['FLOOR']})"
+        )
+
+
+    # Kameranamen unter Windows abfragen
     def get_camera_names_windows(self) -> list[str]:
         try:
             graph = FilterGraph()
@@ -458,9 +497,9 @@ class SquatAnalysisApp:
         # --- Preview area ---
         preview_label = ttk.Label(popup)
         preview_label.pack(padx=12, pady=(6, 10))
+        preview_status_var = tk.StringVar(value="")
+        ttk.Label(popup, textvariable=preview_status_var).pack(padx=12, pady=(0, 8), anchor="w")
 
-        status_var = tk.StringVar(value="")
-        ttk.Label(popup, textvariable=status_var).pack(padx=12, pady=(0, 8), anchor="w")
 
         sel0 = self.camera_var.get().strip()
         if sel0:
@@ -469,7 +508,7 @@ class SquatAnalysisApp:
             if not ok:
                 status_var.set("Preview not available for this camera.")
 
-        self._update_preview_frame(preview_label, popup, status_var)
+        self._update_preview_frame(preview_label, popup, preview_status_var)
 
 
         popup.title("Select camera")
@@ -559,16 +598,13 @@ class SquatAnalysisApp:
             self.camera_started = False
             self.tracking_status_var.set("Tracking: ❌ no camera selected")
             return
-        
-        self.camera_started = True
-        self.tracking_status_var.set(f"Tracking: camera {sel} ready ✅")
-        self.active_camera_var.set(f"Camera: {sel}")
-        print(f"✅ Camera opened: {sel}")
 
-        # falls Messung läuft: sauber stoppen
+        self.active_camera_var.set(f"Camera: {sel}")
+
+        # falls Messung läuft: sauber stoppen (ohne Histogramm-Sprung)
         if self.is_measuring:
             self.stop_measurement(show_hist=False)
-            self.notebook.select(self.tab_live)  
+            self.notebook.select(self.tab_live)
 
         # OpenCV-Fenster schließen (wichtig beim Wechsel)
         try:
@@ -588,58 +624,30 @@ class SquatAnalysisApp:
         import time
         time.sleep(0.2)
 
-        # Kameraindex aus UI
-        sel = self.camera_var.get().strip()
-        if not sel:
-            print("❌ No camera selected.")
-            self.camera_started = False
-            self.tracking_status_var.set("Tracking: ❌ no camera selected")
-            return
-
+        # Kameraindex aus UI (sel ist schon vorhanden)
         cam_index = int(sel.split(" - ")[0])
 
-
-        # Falls schon offen -> sauber schließen
-        if self.cap is not None:
-            try:
-                self.cap.release()
-            except Exception:
-                pass
-            self.cap = None
-
-        # Backend (Windows: DSHOW bewährt). Wenn du nicht Windows nutzt: einfach cv2.VideoCapture(cam_index)
+        # Öffnen (bei dir DSHOW stabil)
         cap = self._open_camera_by_index(cam_index)
-        if cap is None:
+        if cap is None or (not cap.isOpened()):
             print(f"❌ Cannot open camera index {cam_index}")
             self.cap = None
             self.camera_started = False
             self.tracking_status_var.set("Tracking: ❌ camera not opened")
             return
-        self.cap = cap
 
-        if not self.cap.isOpened():
-            print(f"❌ Cannot open camera index {cam_index}")
-            self.cap = None
-            self.camera_started = False
-            self.tracking_status_var.set("Tracking: ❌ camera not opened")
-            return
+        self.cap = cap
 
         # Low-latency / Performance settings (best effort)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
-        
-
-        if not self.cap.isOpened():
-            print(f"❌ Cannot open camera index {cam_index}")
-            self.camera_started = False
-            self.tracking_status_var.set("Tracking: ❌ camera not opened")
-            return
 
         self.camera_started = True
         self.tracking_status_var.set(f"Tracking: camera {cam_index} ready ✅")
         print(f"✅ Camera {cam_index} opened successfully")
+
 
     def _open_camera_by_index(self, index: int):
         cap = cv2.VideoCapture(index)
@@ -777,8 +785,10 @@ class SquatAnalysisApp:
                 self.update_live_plots()
                 self._toc("plot", t0)
 
-            if (self.MARKER_BAR_ID in self.last_centers) and (bar_height_px is not None):
-                bar = self.last_centers[self.MARKER_BAR_ID]
+            # --- Bar path aufzeichnen ---
+            bar_id = self._get_role_id("BAR", self.MARKER_BAR_ID)
+            if (bar_id in self.last_centers) and (bar_height_px is not None):
+                bar = self.last_centers[bar_id]
                 bar_x_px = float(bar[0])
                 bar_y_px = float(bar[1])
 
@@ -847,23 +857,36 @@ class SquatAnalysisApp:
         # Start: nehme die letzten Zentren als Basis
         centers = dict(self.last_centers) if self.last_centers else {}
 
+        # ArUco Tracker updaten
         try:
             t0 = self._tic("aruco.update")
             detected = self.tracker.update(frame, draw=True)
             self._toc("aruco.update", t0)
-            # Merge: neue Detektionen überschreiben alte, aber fehlende bleiben kurz erhalten
             if detected is not None and len(detected) > 0:
                 centers.update(detected)
         except Exception as e:
             print("Tracker error:", e)
-            # centers bleibt dann die letzte brauchbare Schätzung
+
+        # kalibrieren (mit aktuellen Zentren)
+        self._try_standing_calibration(centers)
 
         self.last_centers = centers
 
+        # Versuche stehende Kalibrierung
+        self._try_standing_calibration(centers)
+
+        # --- Winkelberechnung ---
         t0 = self._tic("angles")
-        femur_angle = femur_angle_depth_signed_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
-        depth_angle = squat_depth_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID)
-        knee_valid = knee_valid_angle_deg(centers, self.MARKER_HIP_ID, self.MARKER_KNEE_ID, self.MARKER_ANKLE_ID, reference_deg=90.0)
+        hip_id   = self._get_role_id("HIP", self.MARKER_HIP_ID)
+        knee_id  = self._get_role_id("KNEE", self.MARKER_KNEE_ID)
+        ankle_id = self._get_role_id("ANKLE", self.MARKER_ANKLE_ID)
+        bar_id   = self._get_role_id("BAR", self.MARKER_BAR_ID)
+        floor_id = self._get_role_id("FLOOR", self.MARKER_FLOOR_ID)
+
+        femur_angle = femur_angle_depth_signed_deg(centers, hip_id, knee_id)
+        depth_angle = squat_depth_angle_deg(centers, hip_id, knee_id)
+        knee_valid  = knee_valid_angle_deg(centers, hip_id, knee_id, ankle_id, reference_deg=90.0)
+
         self._toc("angles", t0)
 
         # --- Bar depth (relative, px) ---
@@ -874,8 +897,8 @@ class SquatAnalysisApp:
         bar_height_abs_cm = None
         MARKER_SIZE_MM = 90.0  # Boden-ArUco ist 90x90 mm
 
-        if self.MARKER_BAR_ID in centers:
-            bar_y_px = float(centers[self.MARKER_BAR_ID][1])
+        if bar_id in centers:
+            bar_y_px = float(centers[bar_id][1])
 
             # --- set bar reference (lock when still) ---
             if not self._bar_ref_locked:
@@ -896,9 +919,9 @@ class SquatAnalysisApp:
 
             # absolute height using FLOOR marker
             mm_per_px = self.tracker.mm_per_px
-            if (mm_per_px is not None) and (self.MARKER_FLOOR_ID in centers):
+            if (mm_per_px is not None) and (floor_id in centers):
                 self._floor_marker_seen = True
-                floor_center_y_px = float(centers[self.MARKER_FLOOR_ID][1])
+                floor_center_y_px = float(centers[floor_id][1])
 
                 marker_size_px = MARKER_SIZE_MM / mm_per_px
                 floor_ground_y_px = floor_center_y_px + 0.5 * marker_size_px
@@ -996,12 +1019,13 @@ class SquatAnalysisApp:
     # ------------------------------------------------------------------
     def update_tracking_status(self, centers: dict):
         required = {
-            self.MARKER_HIP_ID: "HIP",
-            self.MARKER_KNEE_ID: "KNEE",
-            self.MARKER_ANKLE_ID: "ANKLE",
-            self.MARKER_BAR_ID: "BAR",
-            self.MARKER_FLOOR_ID: "FLOOR",
+            self._get_role_id("HIP", self.MARKER_HIP_ID): "HIP",
+            self._get_role_id("KNEE", self.MARKER_KNEE_ID): "KNEE",
+            self._get_role_id("ANKLE", self.MARKER_ANKLE_ID): "ANKLE",
+            self._get_role_id("BAR", self.MARKER_BAR_ID): "BAR",
+            self._get_role_id("FLOOR", self.MARKER_FLOOR_ID): "FLOOR",
         }
+
 
         present = [mid for mid in required.keys() if mid in centers]
         missing = [required[mid] for mid in required.keys() if mid not in centers]
@@ -1022,31 +1046,34 @@ class SquatAnalysisApp:
         else:
             self.tracking_status_var.set("Tracking: EXCELLENT (5/5 markers)")
 
-    # ------------------------------------------------------------------
     # Visualization: segments + bar marker
-    # ------------------------------------------------------------------
     def draw_segments(self, frame):
         centers = self.last_centers
 
+        hip_id   = self._get_role_id("HIP", self.MARKER_HIP_ID)
+        knee_id  = self._get_role_id("KNEE", self.MARKER_KNEE_ID)
+        ankle_id = self._get_role_id("ANKLE", self.MARKER_ANKLE_ID)
+        bar_id   = self._get_role_id("BAR", self.MARKER_BAR_ID)
+
+        has_hip   = hip_id in centers
+        has_knee  = knee_id in centers
+        has_ankle = ankle_id in centers
+        has_bar   = bar_id in centers
+
         hip_pt = knee_pt = ankle_pt = bar_pt = None
 
-        has_hip = self.MARKER_HIP_ID in centers
-        has_knee = self.MARKER_KNEE_ID in centers
-        has_ankle = self.MARKER_ANKLE_ID in centers
-        has_bar = self.MARKER_BAR_ID in centers
-
         if has_hip:
-            hip = centers[self.MARKER_HIP_ID]
+            hip = centers[hip_id]
             hip_pt = (int(hip[0]), int(hip[1]))
             cv2.circle(frame, hip_pt, 6, (0, 0, 255), -1)  # rot
 
         if has_knee:
-            knee = centers[self.MARKER_KNEE_ID]
+            knee = centers[knee_id]
             knee_pt = (int(knee[0]), int(knee[1]))
             cv2.circle(frame, knee_pt, 6, (255, 0, 0), -1)  # blau
 
         if has_ankle:
-            ankle = centers[self.MARKER_ANKLE_ID]
+            ankle = centers[ankle_id]
             ankle_pt = (int(ankle[0]), int(ankle[1]))
             cv2.circle(frame, ankle_pt, 6, (0, 255, 0), -1)  # grün
 
@@ -1060,13 +1087,15 @@ class SquatAnalysisApp:
 
         # Bar marker + horizontal line
         if has_bar:
-            bar = centers[self.MARKER_BAR_ID]
+            bar = centers[bar_id]
             bar_pt = (int(bar[0]), int(bar[1]))
             cv2.circle(frame, bar_pt, 7, (0, 255, 255), -1)  # gelb
 
             h, w, _ = frame.shape
             cv2.line(frame, (0, bar_pt[1]), (w, bar_pt[1]), (0, 255, 255), 2)
-            cv2.putText(frame, "BAR (43)", (bar_pt[0] + 10, bar_pt[1] - 10),
+
+            # Label: zeige echte ID statt fix "43"
+            cv2.putText(frame, f"BAR ({bar_id})", (bar_pt[0] + 10, bar_pt[1] - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
     # Klasse zur Stabilitätsbewertung der Squat-Tiefe
