@@ -5,15 +5,16 @@ from collections import deque
 import numpy as np
 import time  # für tic toc Profiling
 from pygrabber.dshow_graph import FilterGraph
-
+from PIL import Image, ImageTk
 import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
 from aruco_tracker import ArucoTracker, ArucoTrackerConfig
 from angles import squat_depth_angle_deg, knee_valid_angle_deg, femur_angle_depth_signed_deg
 from sound import play_valid_squat_sound as _play_valid_squat_sound
+
+
 # =========================
 # Plot configuration
 # =========================
@@ -47,6 +48,8 @@ class SquatAnalysisApp:
         # GUI Setup
         # -------------------------
         self.window = tk.Tk()
+        self.window.grid_rowconfigure(1, weight=1)
+        self.window.grid_columnconfigure(0, weight=1)
         self.window.title("Squat Analysis")
 
         # -------------------------
@@ -58,7 +61,7 @@ class SquatAnalysisApp:
 
         self.notebook.add(self.tab_live, text="Live")
         self.notebook.add(self.tab_hist, text="Histogram")
-        self.notebook.pack(fill=tk.BOTH, expand=True)
+        self.notebook.grid(row=1, column=0, sticky="nsew")
 
         # -------------------------
         # Tk Variables / Labels (Live Tab)
@@ -159,10 +162,10 @@ class SquatAnalysisApp:
 
         self.camera_var = tk.StringVar(value=default_val)
 
-        cam_frame = ttk.LabelFrame(self.window, text="Camera setup")
-        cam_frame.pack(fill="x", pady=(0, 10))
+        cam_frame = ttk.LabelFrame(self.window, text="Change Camera")
+        cam_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 6))
 
-        ttk.Label(cam_frame, text="Camera:").pack(side="left", padx=(8, 4))
+        ttk.Label(cam_frame, text="Currently used Camera:").pack(side="left", padx=(8, 4))
 
         self.camera_combo = ttk.Combobox(
             cam_frame,
@@ -182,6 +185,9 @@ class SquatAnalysisApp:
         # -------------------------
         self.cap = None  # wird in start_program initialisiert
         self.camera_started = False
+        self._preview_cap = None
+        self._preview_imgtk = None  # Referenz halten, sonst flackert’s / bleibt schwarz
+
 
         # Update interval für GUI loop
         self.update_interval = 40  # ms ≈ 25 fps GUI loop
@@ -266,7 +272,7 @@ class SquatAnalysisApp:
         self.bar_path_y = []
 
         # "Standpose" & "movement" thresholds (px)
-        self.stand_depth_threshold_px = 10.0   # ab hier gilt: nicht mehr Standphase --> EVTL noch anpassen
+        self.stand_depth_threshold_px = 10.0   # ab hier gilt: nicht mehr Standphase
         self.motion_threshold_px = 2       # minimale Änderung zwischen Frames, um als "moving" zu zählen
 
         # Vorwert für Bewegungsdetektion
@@ -342,15 +348,14 @@ class SquatAnalysisApp:
             self.update_loop()
             print("Measurement started")
 
-    def stop_measurement(self):
+    def stop_measurement(self, show_hist: bool = True):
         self.is_measuring = False
         self.active_camera_var.set("Camera: --")
         print("Measurement stopped")
 
-        # render histograms and switch tab
-        self.render_histograms()
-        self.notebook.select(self.tab_hist)
-
+        if show_hist:
+            self.render_histograms()
+            self.notebook.select(self.tab_hist)
 
     def on_close(self):
         # 1) Measurement
@@ -393,7 +398,7 @@ class SquatAnalysisApp:
     def run(self):
         self.window.mainloop()
 
-    def list_available_cameras(self, max_index: int = 5) -> list[int]:
+    def list_available_cameras(self, max_index: int = 3) -> list[int]:
         available = []
         for i in range(max_index + 1):
             cap = self._open_camera_by_index(i)
@@ -450,6 +455,23 @@ class SquatAnalysisApp:
             justify="left", font=("Arial", 12),
             wraplength=520).pack(padx=12, pady=(0, 10), anchor="w")
 
+        # --- Preview area ---
+        preview_label = ttk.Label(popup)
+        preview_label.pack(padx=12, pady=(6, 10))
+
+        status_var = tk.StringVar(value="")
+        ttk.Label(popup, textvariable=status_var).pack(padx=12, pady=(0, 8), anchor="w")
+
+        sel0 = self.camera_var.get().strip()
+        if sel0:
+            cam_index0 = int(sel0.split(" - ")[0])
+            ok = self._open_preview_camera(cam_index0)
+            if not ok:
+                status_var.set("Preview not available for this camera.")
+
+        self._update_preview_frame(preview_label, popup, status_var)
+
+
         popup.title("Select camera")
         popup.resizable(False, False)
 
@@ -479,6 +501,18 @@ class SquatAnalysisApp:
         )
         combo.pack(padx=12, pady=(0, 10))
 
+        # Kamera-Wechsel Event
+        def on_cam_change(_evt=None):
+            sel = self.camera_var.get().strip()
+            if not sel:
+                return
+            cam_index = int(sel.split(" - ")[0])
+            ok = self._open_preview_camera(cam_index)
+            if not ok:
+                status_var.set("Preview not available for this camera.")
+
+        combo.bind("<<ComboboxSelected>>", on_cam_change)
+
         # Status
         status_var = tk.StringVar(value="")
         ttk.Label(popup, textvariable=status_var).pack(padx=12, pady=(0, 8))
@@ -491,7 +525,7 @@ class SquatAnalysisApp:
             if not self.camera_var.get().strip():
                 status_var.set("No camera found.")
                 return
-
+            self._close_preview()
             self.start_program()  # öffnet Kamera anhand camera_var
             if getattr(self, "camera_started", False):
                 popup.destroy()
@@ -500,6 +534,8 @@ class SquatAnalysisApp:
 
         def do_exit():
             # User will nicht wählen -> App schließen
+            popup.destroy()
+            self._close_preview()
             popup.destroy()
             self.on_close()
 
@@ -531,7 +567,8 @@ class SquatAnalysisApp:
 
         # falls Messung läuft: sauber stoppen
         if self.is_measuring:
-            self.stop_measurement()
+            self.stop_measurement(show_hist=False)
+            self.notebook.select(self.tab_live)  
 
         # OpenCV-Fenster schließen (wichtig beim Wechsel)
         try:
@@ -605,17 +642,13 @@ class SquatAnalysisApp:
         print(f"✅ Camera {cam_index} opened successfully")
 
     def _open_camera_by_index(self, index: int):
-        """Try to open camera index with multiple backends. Return opened cap or None."""
-        for backend in (0, cv2.CAP_MSMF):  # MSMF first, then default
-            cap = cv2.VideoCapture(index, backend) if backend != 0 else cv2.VideoCapture(index)
-            if cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    return cap
-            cap.release()
+        cap = cv2.VideoCapture(index)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                return cap
+        cap.release()
         return None
-
-
 
 
     # ------------------------------------------------------------------
@@ -667,9 +700,19 @@ class SquatAnalysisApp:
             # Tracking status text (für Overlay)
             tracking_text = self.tracking_status_var.get() if hasattr(self, "tracking_status_var") else None
 
+            # progress: 0..1 (0=zu hoch, 1=valid tief)
+            progress = None
+            if squat_depth_angle is not None:
+                # high_threshold ~ oben, ok_threshold ~ unten (tiefer)
+                top = self.depth_high_threshold       # z.B. +2
+                bottom = self.depth_ok_threshold      # z.B. -2
+                if top != bottom:
+                    progress = (top - squat_depth_angle) / (top - bottom)
+                    progress = max(0.0, min(1.0, float(progress)))
+
             t0 = self._tic("cv_draw")
             # Live-Farbfeedback ins Kamerabild
-            self.draw_live_feedback(frame, cls, tracking_text=tracking_text)
+            self.draw_live_feedback(frame, cls, tracking_text=tracking_text, progress=progress)
             self._toc("cv_draw", t0)
 
             # Cooldown runterzählen
@@ -743,7 +786,7 @@ class SquatAnalysisApp:
                 if mm_per_px is not None:
                     bar_x_cm = (bar_x_px * mm_per_px) / 10.0
 
-                    # Bewegung erkennen (weiterhin in px!)
+                    # Bewegung erkennen weiterhin in px
                     moving = False
                     if (bar_height_px is not None) and (self._prev_bar_height_px is not None):
                         if abs(bar_height_px - self._prev_bar_height_px) >= self.motion_threshold_px:
@@ -773,7 +816,7 @@ class SquatAnalysisApp:
 
             t0 = self._tic("cv_draw")
             # Overlay Status-Text
-            cv2.putText(frame, f"State: {self._squat_state}", (10, 65),
+            cv2.putText(frame, f"State: {self._squat_state}", (20, 70),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             self._toc("cv_draw", t0)
 
@@ -957,12 +1000,15 @@ class SquatAnalysisApp:
             self.MARKER_KNEE_ID: "KNEE",
             self.MARKER_ANKLE_ID: "ANKLE",
             self.MARKER_BAR_ID: "BAR",
+            self.MARKER_FLOOR_ID: "FLOOR",
         }
 
         present = [mid for mid in required.keys() if mid in centers]
         missing = [required[mid] for mid in required.keys() if mid not in centers]
 
-        if len(present) == 4:
+        if len(present) == 5:
+            status = "EXCELLENT"
+        elif len(present) == 4:
             status = "OK"
         elif len(present) == 3:
             status = "DEGRADED"
@@ -974,7 +1020,7 @@ class SquatAnalysisApp:
         if missing:
             self.tracking_status_var.set(f"Tracking: {status}  (missing: {', '.join(missing)})")
         else:
-            self.tracking_status_var.set("Tracking: OK  (4/4 markers)")
+            self.tracking_status_var.set("Tracking: EXCELLENT (5/5 markers)")
 
     # ------------------------------------------------------------------
     # Visualization: segments + bar marker
@@ -1055,7 +1101,7 @@ class SquatAnalysisApp:
         high_stable = self._high_streak >= self.stable_frames_required
         return depth_class, ok_stable, high_stable
 
-    def draw_live_feedback(self, frame, cls, tracking_text=None):
+    def draw_live_feedback(self, frame, cls, tracking_text=None, progress=None):
         """
         Draws a colored status box + text overlay on the camera frame.
         cls: None / "OK" / "HIGH" / "TRANSITION" / "BORDERLINE"
@@ -1064,7 +1110,7 @@ class SquatAnalysisApp:
         # Farben (BGR!)
         if cls == "OK":
             color = (0, 200, 0)       # grün
-            text = "VALID (OK)"
+            text = "VALID"
         elif cls == "HIGH":
             color = (0, 0, 255)       # rot
             text = "TOO HIGH"
@@ -1078,25 +1124,92 @@ class SquatAnalysisApp:
         h, w = frame.shape[:2]
 
         # Hintergrundbox (oben links)
+        overlay = frame.copy()
         x1, y1 = 10, 10
-        x2, y2 = 330, 70
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, -1)
+        x2, y2 = 310, 80
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+        alpha = 0.35  # 0.0 = unsichtbar, 1.0 = voll deckend
+        frame[:] = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
 
         # Text in die Box (weiß)
-        cv2.putText(frame, text, (x1 + 10, y1 + 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, text, (x1 + 10, y1 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
         # Optional: Tracking-Text darunter
-        if tracking_text:
-            cv2.putText(frame, tracking_text, (10, 95),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        #if tracking_text:
+            #cv2.putText(frame, tracking_text, (10, 95),
+                        #cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # Optional: Rahmen ums ganze Bild (starker visueller Hinweis)
+        # Rahmen ums ganze Bild (starker visueller Hinweis)
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), color, 6)
 
-    # ------------------------------------------------------------------
+        
+        #  vertical progress bar (right side)
+        # progress: 0..1 (0=zu hoch, 1=valid tief). Falls None -> nur Rahmen anzeigen
+        # Tipp: Übergib progress aus update_loop (wie besprochen). Wenn du’s noch nicht tust:
+        # progress = None lassen oder erstmal fix 0.5 testen.
+
+        bar_x = x1                 # links bündig mit Box
+        bar_y = y2 + 12            # unter Box
+        bar_w = 36                 # schlank/modern
+        bar_h = 160                # Höhe der Bar
+
+        # falls Bild klein ist -> Bar nach oben begrenzen
+        bar_y2 = min(bar_y + bar_h, h - 10)
+        bar_y1 = bar_y
+        bar_h_eff = bar_y2 - bar_y1
+        bar_x1 = bar_x
+        bar_x2 = bar_x1 + bar_w
+
+        # Halbtransparenter Hintergrund
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (bar_x1, bar_y1), (bar_x2, bar_y2), (0, 0, 0), -1)
+        frame[:] = cv2.addWeighted(overlay, 0.28, frame, 0.72, 0)
+
+        # Dezenter Rahmen
+        cv2.rectangle(frame, (bar_x1, bar_y1), (bar_x2, bar_y2), (255, 255, 255), 1, cv2.LINE_AA)
+
+        # "Ticks" für Orientierung (HIGH / BORDERLINE / OK)
+        y_tick1 = bar_y1 + int(bar_h_eff * 0.33)
+        y_tick2 = bar_y1 + int(bar_h_eff * 0.66)
+        cv2.line(frame, (bar_x1 + 5, y_tick1), (bar_x2 - 5, y_tick1), (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.line(frame, (bar_x1 + 5, y_tick2), (bar_x2 - 5, y_tick2), (255, 255, 255), 1, cv2.LINE_AA)
+
+        # "Rounded" Look
+        pad = 4
+        ix1, iy1 = bar_x1 + pad, bar_y1 + pad
+        ix2, iy2 = bar_x2 - pad, bar_y2 - pad
+
+        #mInnenfläche leicht abdunkeln (gibt depth)
+        overlay2 = frame.copy()
+        cv2.rectangle(overlay2, (ix1, iy1), (ix2, iy2), (0, 0, 0), -1)
+        frame[:] = cv2.addWeighted(overlay2, 0.12, frame, 0.88, 0)
+
+        # Füllstand zeichnen
+        # progress in [0..1], 0=oben (zu hoch), 1=unten (valid tief)
+        if progress is not None and bar_h_eff > 8:
+            p = max(0.0, min(1.0, float(progress)))
+            fill_top = iy1 + int((1.0 - p) * (iy2 - iy1))
+            fill_top = max(iy1, min(fill_top, iy2))
+
+            # Füllung
+            cv2.rectangle(frame, (ix1, fill_top), (ix2, iy2), color, -1)
+
+            # "Rounded caps" simulieren: kleine Kreise oben/unten der Füllung
+            cx = (ix1 + ix2) // 2
+            r = max(2, (ix2 - ix1) // 2)
+            cv2.circle(frame, (cx, iy2), r, color, -1)          # unten rund
+            cv2.circle(frame, (cx, fill_top), r, color, -1)     # oben rund
+
+        # Labels rechts daneben
+        cv2.putText(frame, "HIGH", (bar_x2 + 10, bar_y1 + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(frame, "OK", (bar_x2 + 10, bar_y2 - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    
     # Histogram rendering (called on stop)
-    # ------------------------------------------------------------------
     def render_histograms(self):
         # --- old canvas entfernen (falls vorhanden) ---
         if self.hist_canvas is not None:
@@ -1182,3 +1295,85 @@ class SquatAnalysisApp:
     # ------------------------------------------------------------------
     def play_valid_squat_sound(self):
         _play_valid_squat_sound(self.sound_enabled_var.get())
+
+    def _open_preview_camera(self, cam_index: int):
+        # alte Preview schließen
+        if self._preview_cap is not None:
+            try:
+                self._preview_cap.release()
+            except Exception:
+                pass
+            self._preview_cap = None
+
+        # Preview
+        cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+
+        if not cap.isOpened():
+            cap.release()
+            return False
+
+        # settings for low-latency
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+        # warm-up Frames verwerfen
+        ok = False
+        for _ in range(3):
+            ret, _ = cap.read()
+            if ret:
+                ok = True
+                break
+
+        if not ok:
+            cap.release()
+            return False
+
+        self._preview_cap = cap
+        return True
+
+    
+    def _update_preview_frame(self, preview_label, popup, status_var):
+        # Popup wurde geschlossen?
+        try:
+            if not popup.winfo_exists():
+                return
+        except Exception:
+            return
+
+        if self._preview_cap is None:
+            status_var.set("No preview available.")
+            popup.after(200, lambda: self._update_preview_frame(preview_label, popup, status_var))
+            return
+
+        ret, frame = self._preview_cap.read()
+        if not ret or frame is None:
+            status_var.set("Preview: failed to grab frame.")
+            popup.after(200, lambda: self._update_preview_frame(preview_label, popup, status_var))
+            return
+
+        status_var.set("")  # ok
+
+        # BGR -> RGB -> ImageTk
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+
+        # optional: kleiner anzeigen (schneller, passt ins Popup)
+        img.thumbnail((520, 320))
+
+        self._preview_imgtk = ImageTk.PhotoImage(img)
+        preview_label.configure(image=self._preview_imgtk)
+
+        popup.after(30, lambda: self._update_preview_frame(preview_label, popup, status_var))
+
+    def _close_preview(self):
+        if self._preview_cap is not None:
+            try:
+                self._preview_cap.release()
+            except Exception:
+                pass
+            self._preview_cap = None
+        self._preview_imgtk = None
+
+
+
