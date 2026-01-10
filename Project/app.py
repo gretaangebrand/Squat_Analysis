@@ -33,11 +33,11 @@ class SquatAnalysisApp:
     - Histogram Tab (wird beim Stop befüllt, Standpose herausgefiltert)
     """
     # Default IDs (wenn keine Kalibrierung)
-    DEFAULT_HIP_ID = 42
-    DEFAULT_KNEE_ID = 41
-    DEFAULT_ANKLE_ID = 40
-    DEFAULT_BAR_ID = 38
-    DEFAULT_FLOOR_ID = 39
+    MARKER_HIP_ID = 42
+    MARKER_KNEE_ID = 41
+    MARKER_ANKLE_ID = 40
+    MARKER_BAR_ID = 38
+    MARKER_FLOOR_ID = 39
  
     def __init__(self):
         # GUI Setup
@@ -49,13 +49,16 @@ class SquatAnalysisApp:
         # Tabs (Notebook)
         self.notebook = ttk.Notebook(self.window)
         self.tab_live = ttk.Frame(self.notebook)
+        self.tab_plots = ttk.Frame(self.notebook)
         self.tab_hist = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_live, text="Live")
+        self.notebook.add(self.tab_plots, text="Plots")
         self.notebook.add(self.tab_hist, text="Histogram")
         self.notebook.grid(row=1, column=0, sticky="nsew")
 
         # Tk Variables / Labels (Live Tab)
+        self.calib_status_var = tk.StringVar(value="Calibration: ⏳ waiting…")
         self.femur_angle_var = tk.StringVar(value="Femur angle: -- °")
         self.knee_valid_angle_var = tk.StringVar(value="Knee angle: -- °")
         self.squat_status_var = tk.StringVar(value="Squat: --")
@@ -87,6 +90,14 @@ class SquatAnalysisApp:
         ttk.Button(self.left_controls,text="Stop measurement",command=self.stop_measurement).pack(fill="x")
 
         self.right_panel = ttk.Frame(self.tab_live, padding=(10, 10))
+        # --- LIVE TAB: Camera view (Tk label) ---
+        self.camera_label = ttk.Label(self.right_panel)
+        self.camera_label.grid(row=0, column=0, sticky="nsew")
+        self.right_panel.grid_rowconfigure(0, weight=1)
+        self.right_panel.grid_columnconfigure(0, weight=1)
+
+        # Referenz halten (sonst flackert/schwarz)
+        self._live_imgtk = None
 
         self.left_panel.grid(row=0, column=0, sticky="nsw")
         self.right_panel.grid(row=0, column=1, sticky="nsew")
@@ -95,12 +106,24 @@ class SquatAnalysisApp:
         self.right_panel.grid_columnconfigure(0, weight=1)
 
         # LEFT: variables + controls
+        ttk.Label(self.left_panel, textvariable=self.calib_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.femur_angle_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.knee_valid_angle_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.bar_height_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.squat_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel, textvariable=self.tracking_status_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
         ttk.Label(self.left_panel,textvariable=self.active_camera_var, font=("Arial", 16)).pack(anchor="w", pady=(0, 10))
+
+        # --- PLOTS TAB layout ---
+        self.tab_plots.grid_rowconfigure(0, weight=1)
+        self.tab_plots.grid_columnconfigure(0, weight=1)
+
+        self.plots_frame = ttk.Frame(self.tab_plots, padding=(10, 10))
+        self.plots_frame.grid(row=0, column=0, sticky="nsew")
+
+        self.plots_frame.grid_rowconfigure(0, weight=1)
+        self.plots_frame.grid_columnconfigure(0, weight=1)
+
 
         # Knee-valid thresholds (signierter Winkel)
         # Idee: <= 0 bedeutet "mindestens 90° Beugung" erreicht (wie du es willst)
@@ -235,7 +258,7 @@ class SquatAnalysisApp:
 
         self.fig.tight_layout()
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=self.right_panel)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.plots_frame)
         self.canvas.draw()
         self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
 
@@ -304,6 +327,10 @@ class SquatAnalysisApp:
             self._squat_state = "TOP"
             self._ok_streak = 0
             self._high_streak = 0
+            self.role_mapping_locked = False
+            self.role_ids = {}
+            self._calib_y_samples.clear()
+            self.calib_status_var.set("Calibration: ⏳ waiting…")
 
             # bar reference reset
             self.bar_y_ref = None
@@ -399,6 +426,7 @@ class SquatAnalysisApp:
         Uses median y across several frames for each detected ID, then sorts top->bottom.
         """
         if self.role_mapping_locked:
+            self.calib_status_var.set("Calibration: ✅ locked")
             return
 
         # y-samples sammeln
@@ -418,6 +446,7 @@ class SquatAnalysisApp:
 
         # Wir brauchen mind. 5 stabile IDs
         if len(stable) < 5:
+            self.calib_status_var.set(f"Calibration: ⏳ stand still… ({len(stable)}/5)")
             return
 
         # sortieren: kleinster y = oben (BAR), größter y = unten (FLOOR)
@@ -434,18 +463,15 @@ class SquatAnalysisApp:
             "FLOOR": ids_sorted[4],
         }
         self.role_mapping_locked = True
+        self.calib_status_var.set("Calibration: ✅ locked")
 
         # Bar-Referenz zurücksetzen, weil BAR-ID jetzt dynamisch ist
         self.bar_y_ref = None
         self._bar_ref_locked = False
         self._bar_ref_candidates.clear()
 
-        print(f"✅ Standing calibration locked: {self.role_ids}")
-        self.tracking_status_var.set(
-            f"Tracking: calibrated ✅ (BAR={self.role_ids['BAR']}, HIP={self.role_ids['HIP']}, "
-            f"KNEE={self.role_ids['KNEE']}, ANKLE={self.role_ids['ANKLE']}, FLOOR={self.role_ids['FLOOR']})"
-        )
-
+        print(f"✅ Standing calibration locked")
+        print(f"    Assigned roles: {self.role_ids}")
 
     # Kameranamen unter Windows abfragen
     def get_camera_names_windows(self) -> list[str]:
@@ -587,7 +613,7 @@ class SquatAnalysisApp:
         y = self.window.winfo_rooty() + 60
         popup.geometry(f"+{x}+{y}")
 
-        # WICHTIG: Wenn User auf X am Popup drückt -> App schließen (oder du kannst es blockieren)
+        # Wenn User auf X am Popup drückt -> App schließen (oder du kannst es blockieren)
         popup.protocol("WM_DELETE_WINDOW", do_exit)
 
 
@@ -830,16 +856,14 @@ class SquatAnalysisApp:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
             self._toc("cv_draw", t0)
 
-            # Frame anzeigen
-            t0 = self._tic("imshow")
-            if (self._frame_i % self.imshow_every_n) == 0:
-                cv2.imshow("Squat Camera", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    self.stop_measurement()
-            else:
-                # trotzdem Events pumpen, minimal
-                cv2.waitKey(1)
-            self._toc("imshow", t0)
+            # --- Show camera frame inside Tk (Live Tab) ---
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame_rgb)
+            img.thumbnail((980, 720))  # optional: passt ins UI, kannst du anpassen
+
+            self._live_imgtk = ImageTk.PhotoImage(img)
+            self.camera_label.configure(image=self._live_imgtk)
+
 
             # Profiling Ausgabe wenn gewünscht
             self._prof_flush_if_needed()
@@ -871,9 +895,6 @@ class SquatAnalysisApp:
         self._try_standing_calibration(centers)
 
         self.last_centers = centers
-
-        # Versuche stehende Kalibrierung
-        self._try_standing_calibration(centers)
 
         # --- Winkelberechnung ---
         t0 = self._tic("angles")
@@ -1219,8 +1240,10 @@ class SquatAnalysisApp:
         # progress in [0..1], 0=oben (zu hoch), 1=unten (valid tief)
         if progress is not None and bar_h_eff > 8:
             p = max(0.0, min(1.0, float(progress)))
-            fill_top = iy1 + int((1.0 - p) * (iy2 - iy1))
+            p = 1.0 - p   # invertiere progress
+            fill_top = iy2 - int(p * (iy2 - iy1))   # Füllstand von unten
             fill_top = max(iy1, min(fill_top, iy2))
+
 
             # Füllung
             cv2.rectangle(frame, (ix1, fill_top), (ix2, iy2), color, -1)
@@ -1234,7 +1257,7 @@ class SquatAnalysisApp:
         # Labels rechts daneben
         cv2.putText(frame, "HIGH", (bar_x2 + 10, bar_y1 + 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(frame, "OK", (bar_x2 + 10, bar_y2 - 6),
+        cv2.putText(frame, "VALID", (bar_x2 + 10, bar_y2 - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
 
     
