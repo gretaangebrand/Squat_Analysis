@@ -676,7 +676,7 @@ class SquatAnalysisApp:
 
 
     def _open_camera_by_index(self, index: int):
-        cap = cv2.VideoCapture(index)
+        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if cap.isOpened():
             ret, _ = cap.read()
             if ret:
