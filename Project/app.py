@@ -425,7 +425,9 @@ class SquatAnalysisApp:
         Try to assign marker roles based on y-position while standing still.
         Uses median y across several frames for each detected ID, then sorts top->bottom.
         """
+        floor_id = self._get_role_id("FLOOR", self.MARKER_FLOOR_ID)
         if self.role_mapping_locked:
+            floor_id = self.MARKER_FLOOR_ID  # hardcoded floor ID
             self.calib_status_var.set("Calibration: ✅ locked")
             return
 
@@ -436,6 +438,8 @@ class SquatAnalysisApp:
         # Kandidaten: genug Samples + wenig Bewegung (range klein)
         stable = []
         for mid, ys in self._calib_y_samples.items():
+            if mid == floor_id:
+                continue
             if len(ys) < self._calib_min_samples_per_id:
                 continue
             y_min = min(ys)
@@ -444,23 +448,22 @@ class SquatAnalysisApp:
                 y_med = float(np.median(list(ys)))
                 stable.append((y_med, mid))
 
-        # Wir brauchen mind. 5 stabile IDs
-        if len(stable) < 5:
-            self.calib_status_var.set(f"Calibration: ⏳ stand still… ({len(stable)}/5)")
+        # Wir brauchen 4 stabile IDs
+        if len(stable) < 4:
+            self.calib_status_var.set(f"Calibration: ⏳ stand still… ({len(stable)}/4)")
             return
 
-        # sortieren: kleinster y = oben (BAR), größter y = unten (FLOOR)
+        # sortieren: kleinster y = oben (BAR), größter y = unten (ANKLE)
         stable.sort(key=lambda t: t[0])  # nach y_med
 
-        top5 = stable[:5]
-        ids_sorted = [mid for _, mid in top5]
-
+        top4 = stable[:4]
+        ids_sorted = [mid for _, mid in top4]
         self.role_ids = {
             "BAR":   ids_sorted[0],
             "HIP":   ids_sorted[1],
             "KNEE":  ids_sorted[2],
             "ANKLE": ids_sorted[3],
-            "FLOOR": ids_sorted[4],
+            "FLOOR": floor_id,
         }
         self.role_mapping_locked = True
         self.calib_status_var.set("Calibration: ✅ locked")
@@ -471,7 +474,7 @@ class SquatAnalysisApp:
         self._bar_ref_candidates.clear()
 
         print(f"✅ Standing calibration locked")
-        print(f"    Assigned roles: {self.role_ids}")
+        print(f" Assigned roles: {self.role_ids}")
 
     # Kameranamen unter Windows abfragen
     def get_camera_names_windows(self) -> list[str]:
@@ -525,16 +528,7 @@ class SquatAnalysisApp:
         preview_label.pack(padx=12, pady=(6, 10))
         preview_status_var = tk.StringVar(value="")
         ttk.Label(popup, textvariable=preview_status_var).pack(padx=12, pady=(0, 8), anchor="w")
-
-
-        sel0 = self.camera_var.get().strip()
-        if sel0:
-            cam_index0 = int(sel0.split(" - ")[0])
-            ok = self._open_preview_camera(cam_index0)
-            if not ok:
-                status_var.set("Preview not available for this camera.")
-
-        self._update_preview_frame(preview_label, popup, preview_status_var)
+        preview_status_var.set("Camera-Preview: select a camera and click Connect.")
 
 
         popup.title("Select camera")
@@ -574,7 +568,10 @@ class SquatAnalysisApp:
             cam_index = int(sel.split(" - ")[0])
             ok = self._open_preview_camera(cam_index)
             if not ok:
-                status_var.set("Preview not available for this camera.")
+                preview_status_var.set("Preview not available for this camera.")
+                return
+            preview_status_var.set("Preview: Camera opened successfully.")
+            self._update_preview_frame(preview_label, popup, preview_status_var)
 
         combo.bind("<<ComboboxSelected>>", on_cam_change)
 
@@ -587,10 +584,21 @@ class SquatAnalysisApp:
         btn_row.pack(padx=12, pady=(0, 12), fill="x")
 
         def do_connect():
-            if not self.camera_var.get().strip():
-                status_var.set("No camera found.")
+            # User will verbinden -> Kamera öffnen
+            sel = self.camera_var.get().strip()
+            if not sel:
+                preview_status_var.set("Preview: Please select a camera.")
                 return
-            self._close_preview()
+            
+            cam_index = int(sel.split(" - ")[0])
+            ok = self._open_preview_camera(cam_index)
+
+            if not ok:
+                preview_status_var.set("Preview: Cannot open preview for this camera.")
+                return
+            
+            preview_status_var.set("Preview: Camera opened successfully.")
+            self._update_preview_frame(preview_label, popup, preview_status_var)
             self.start_program()  # öffnet Kamera anhand camera_var
             if getattr(self, "camera_started", False):
                 popup.destroy()
