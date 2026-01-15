@@ -52,9 +52,9 @@ class SquatAnalysisApp:
         self.tab_plots = ttk.Frame(self.notebook)
         self.tab_hist = ttk.Frame(self.notebook)
 
-        self.notebook.add(self.tab_live, text="Live")
-        self.notebook.add(self.tab_plots, text="Plots")
-        self.notebook.add(self.tab_hist, text="Histogram")
+        self.notebook.add(self.tab_live, text="Live Squat Analysis")
+        self.notebook.add(self.tab_plots, text="Angle Plots")
+        self.notebook.add(self.tab_hist, text="Histogram - Bar Path")
         self.notebook.grid(row=1, column=0, sticky="nsew")
 
         # Tk Variables / Labels (Live Tab)
@@ -137,6 +137,7 @@ class SquatAnalysisApp:
         # State + Flag, ob unten wirklich gültig war
         self._squat_state = "TOP"          # TOP / BOTTOM
         self._bottom_was_valid = False
+        self._has_moved = False
 
         # Cooldown nach Count, verhindert Doppelt-Zählen bei wackeliger TOP-Phase
         self._cooldown_frames = 0
@@ -275,6 +276,7 @@ class SquatAnalysisApp:
         # "Standpose" & "movement" thresholds (px)
         self.stand_depth_threshold_px = 10.0   # ab hier gilt: nicht mehr Standphase
         self.motion_threshold_px = 2       # minimale Änderung zwischen Frames, um als "moving" zu zählen
+    
 
         # Vorwert für Bewegungsdetektion
         self._prev_bar_height_px = None
@@ -325,6 +327,7 @@ class SquatAnalysisApp:
             self.rep_count = 0
             self.rep_count_var.set("Valid squats: 0")
             self._squat_state = "TOP"
+            self._has_moved = False
             self._ok_streak = 0
             self._high_streak = 0
             self.role_mapping_locked = False
@@ -761,6 +764,15 @@ class SquatAnalysisApp:
             if self._cooldown_frames > 0:
                 self._cooldown_frames -= 1
 
+                # während Cooldown keine Stabilität ansammeln
+                self._ok_streak = 0
+                self._high_streak = 0
+                ok_stable = False
+                high_stable = False
+
+                # "unten gültig" nicht weitertragen
+                self._bottom_was_valid = False
+
             # Kombinierte Stabilisierung (Depth + Knee_valid)
             #cls, ok_stable, high_stable = self.update_validity_stability(squat_depth_angle, knee_valid)
 
@@ -792,8 +804,8 @@ class SquatAnalysisApp:
                 # BOTTOM -> TOP wenn oben stabil erreicht
                 elif self._squat_state == "BOTTOM":
                     if high_stable:
-                        # Zählen nur wenn unten gültig
-                        if self._bottom_was_valid:
+                        # Zählen nur wenn unten gültig und Bewegung da war
+                        if self._bottom_was_valid and self._has_moved:
                             self.rep_count += 1
                             self.rep_count_var.set(f"Valid squats: {self.rep_count}")
                             self.play_valid_squat_sound()
@@ -802,6 +814,7 @@ class SquatAnalysisApp:
                         self._squat_state = "TOP"
                         self._bottom_was_valid = False
                         self._cooldown_frames = self.cooldown_after_rep
+                        self._has_moved = False
 
             # --- Buffers updaten ---
             self.knee_angle_buffer.append(knee_valid if knee_valid is not None else float("nan"))
@@ -836,6 +849,9 @@ class SquatAnalysisApp:
                         if abs(bar_height_px - self._prev_bar_height_px) >= self.motion_threshold_px:
                             moving = True
                     self._prev_bar_height_px = bar_height_px
+
+                    if moving:
+                        self._has_moved = True
 
                     # Nur Bewegungsphase sammeln (Standphase raus)
                     if (cls is not None) and (bar_height_px > self.stand_depth_threshold_px) and moving:
@@ -1282,16 +1298,18 @@ class SquatAnalysisApp:
 
         # Joint-Layout: oben Histogramm-x, rechts Histogramm-y, Mitte Ring
         gs = self.hist_fig.add_gridspec(
-            2, 2,
-            width_ratios=[4, 1],
+            2, 3,
+            width_ratios=[4, 1, 0.15],   # letzte Spalte = Colorbar
             height_ratios=[1, 4],
-            wspace=0.05,
+            wspace=0.15,
             hspace=0.05
         )
+
 
         ax_histx = self.hist_fig.add_subplot(gs[0, 0])
         ax_main  = self.hist_fig.add_subplot(gs[1, 0], sharex=ax_histx)
         ax_histy = self.hist_fig.add_subplot(gs[1, 1], sharey=ax_main)
+        ax_cbar   = self.hist_fig.add_subplot(gs[1, 2])  # für colorbar
 
         # --- Check data ---
         if not self._floor_marker_seen:
@@ -1321,10 +1339,12 @@ class SquatAnalysisApp:
             y = np.asarray(self.bar_path_y, dtype=float)
 
             # Main: 2D density + trajectory line (Ring)
-            ax_main.hist2d(x, y, bins=30)
+            h = ax_main.hist2d(x, y, bins=30, cmap="viridis")
+            cbar = self.hist_fig.colorbar(h[3], cax=ax_cbar)
+            cbar.set_label("Sample density (count)", rotation=90, labelpad=10)
             ax_main.plot(x, y, linewidth=1)  # Trajektorie darüber
 
-            ax_main.set_title("Bar path during squats (movement phases)")
+            #ax_main.set_title("Bar path during squats (movement phases)")
             ax_main.set_xlabel("Horizontal Movement (cm)")
             ax_main.set_ylabel("Height above floor (cm)")
             ax_main.grid(True)
