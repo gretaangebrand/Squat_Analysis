@@ -1,13 +1,17 @@
 .venv/
 venv/
 __pycache__/
-build
-main.spec
-dist/
-installer/
-assets/
 *.pyc
-vc_redist.x64.exe
-SquatAnalysisApp.iss
-SquatAnalysisInstaller.exe
+
+# ===== PyInstaller =====
+dist/
+build/
+*.spec
+main.spec
+
+# ===== Inno Setup =====
+Project/installer/*Installer*.exe
+
+# ===== External binaries =====
+Project/installer/vc_redist.x64.exe
 
