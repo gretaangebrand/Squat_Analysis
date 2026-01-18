@@ -4,4 +4,10 @@ __pycache__/
 build
 main.spec
 dist/
+installer/
+assets/
 *.pyc
+vc_redist.x64.exe
+SquatAnalysisApp.iss
+SquatAnalysisInstaller.exe
+
